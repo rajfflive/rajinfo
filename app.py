@@ -311,52 +311,7 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= ROBUST JSON EXTRACTOR & MERGER =================
-def extract_json_objects(text):
-    """Extract all balanced JSON objects from text."""
-    objects = []
-    i = 0
-    while i < len(text):
-        if text[i] == '{':
-            depth = 0
-            j = i
-            while j < len(text):
-                if text[j] == '{':
-                    depth += 1
-                elif text[j] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[i:j+1]
-                        try:
-                            obj = json.loads(candidate)
-                            objects.append(obj)
-                            i = j
-                            break
-                        except:
-                            pass
-                j += 1
-        i += 1
-    return objects
-
-def deep_merge(base, override):
-    """Deep merge two dictionaries (override wins)."""
-    for key, value in override.items():
-        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
-            deep_merge(base[key], value)
-        else:
-            base[key] = value
-    return base
-
-def merge_json_objects(objects):
-    """Merge all objects into one, preserving all fields."""
-    if not objects:
-        return {}
-    merged = {}
-    for obj in objects:
-        deep_merge(merged, obj)
-    return merged
-
-# ================= QUERY FUNCTION (RETRY LOGIC) =================
+# ================= QUERY FUNCTION (POLLING + SINGLE JSON EXTRACTION) =================
 def query_bot_sync(command_text, group_type):
     account = get_next_account()
     if not account:
@@ -403,31 +358,37 @@ def query_bot_sync(command_text, group_type):
                 unique_replies.append(msg)
         unique_replies.sort(key=lambda m: m.date)
 
+        # Combine raw text of all replies WITHOUT adding separators
         combined_text = "".join([msg.raw_text for msg in unique_replies])
 
-        # Extract all JSON objects
-        objects = extract_json_objects(combined_text)
-        if not objects:
+        # Find the complete JSON object
+        start = combined_text.find('{')
+        end = combined_text.rfind('}') + 1
+        if start == -1 or end <= start:
             await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
-            return {"error": "No valid JSON objects found"}
+            return {"error": "No valid JSON found"}
 
-        # Merge all objects deeply
-        merged = merge_json_objects(objects)
+        json_str = combined_text[start:end]
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}\nJSON string: {json_str[:500]}")
+            await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
+            return {"error": f"Invalid JSON: {str(e)}"}
 
-        # Override tags
-        merged["developer"] = DEVELOPER_TAG
-        merged["tag"] = DEVELOPER_TAG
-        # Also override any inner tag if exists
-        if "result" in merged and isinstance(merged["result"], dict):
-            merged["result"]["developer"] = DEVELOPER_TAG
-            merged["result"]["tag"] = DEVELOPER_TAG
+        # Override tags at all levels
+        data["developer"] = DEVELOPER_TAG
+        data["tag"] = DEVELOPER_TAG
+        if "result" in data and isinstance(data["result"], dict):
+            data["result"]["developer"] = DEVELOPER_TAG
+            data["result"]["tag"] = DEVELOPER_TAG
 
         # Delete command and all bot replies
         to_delete = [msg_id] + [m.id for m in unique_replies]
         await client.delete_messages(group.id, to_delete)
         logger.info(f"🗑️ Deleted {len(to_delete)} messages")
 
-        return merged
+        return data
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
@@ -477,24 +438,21 @@ for cmd in ALL_COMMANDS:
             cached = get_cached(cmd, value)
             if cached is not None:
                 # Ensure cached also has tags
-                if "developer" not in cached:
-                    cached["developer"] = DEVELOPER_TAG
-                if "tag" not in cached:
-                    cached["tag"] = DEVELOPER_TAG
+                cached["developer"] = DEVELOPER_TAG
+                cached["tag"] = DEVELOPER_TAG
+                if "result" in cached and isinstance(cached["result"], dict):
+                    cached["result"]["developer"] = DEVELOPER_TAG
+                    cached["result"]["tag"] = DEVELOPER_TAG
                 log_usage(request.api_key, cmd, value, json.dumps(cached), True, None)
                 return jsonify(cached)
             group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
             result = query_bot_sync(f"/{cmd} {value}", group_type)
-            # Ensure tags
-            if "developer" not in result:
-                result["developer"] = DEVELOPER_TAG
-            if "tag" not in result:
-                result["tag"] = DEVELOPER_TAG
+            # Ensure tags (already done in query, but for safety)
+            result["developer"] = DEVELOPER_TAG
+            result["tag"] = DEVELOPER_TAG
             if "result" in result and isinstance(result["result"], dict):
-                if "developer" not in result["result"]:
-                    result["result"]["developer"] = DEVELOPER_TAG
-                if "tag" not in result["result"]:
-                    result["result"]["tag"] = DEVELOPER_TAG
+                result["result"]["developer"] = DEVELOPER_TAG
+                result["result"]["tag"] = DEVELOPER_TAG
             if "error" not in result:
                 set_cache(cmd, value, result)
             log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
@@ -506,10 +464,8 @@ for cmd in ALL_COMMANDS:
 @require_api_key
 def statu_endpoint():
     result = query_bot_sync("/statu", "other")
-    if "developer" not in result:
-        result["developer"] = DEVELOPER_TAG
-    if "tag" not in result:
-        result["tag"] = DEVELOPER_TAG
+    result["developer"] = DEVELOPER_TAG
+    result["tag"] = DEVELOPER_TAG
     if "result" in result and isinstance(result["result"], dict):
         result["result"]["developer"] = DEVELOPER_TAG
         result["result"]["tag"] = DEVELOPER_TAG
