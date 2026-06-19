@@ -51,7 +51,7 @@ def clear_cache():
     global response_cache
     response_cache.clear()
 
-# ================= DATABASE (unchanged) =================
+# ================= DATABASE =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -311,25 +311,9 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= ROBUST JSON EXTRACTION =================
-def extract_json_from_text(text):
-    """Extract JSON using multiple strategies."""
-    if not text:
-        return None
-
-    # Strategy 1: Try to parse the entire text as JSON (cleaned)
-    # Remove any non-JSON prefix/suffix (like the bot's header/footer)
-    # We'll try to find the first '{' and last '}'
-    start = text.find('{')
-    end = text.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        candidate = text[start:end+1]
-        try:
-            return json.loads(candidate)
-        except:
-            pass
-
-    # Strategy 2: Extract all balanced JSON objects and merge
+# ================= BULLETPROOF JSON EXTRACTION =================
+def extract_all_balanced(text):
+    """Extract all balanced JSON objects from text, return list of (obj, length)."""
     objects = []
     i = 0
     while i < len(text):
@@ -345,44 +329,65 @@ def extract_json_from_text(text):
                         candidate = text[i:j+1]
                         try:
                             obj = json.loads(candidate)
-                            objects.append(obj)
+                            objects.append((obj, len(candidate)))
                             i = j
                             break
                         except:
                             pass
                 j += 1
         i += 1
+    return objects
 
-    if objects:
-        # Merge all objects, but prioritize the one with 'result' key
-        # If there's an object with 'result', use that as the base, then merge others into it.
-        base = None
-        others = []
-        for obj in objects:
-            if 'result' in obj:
-                if base is None:
-                    base = obj.copy()
+def deep_merge(base, override):
+    """Deep merge with array extension."""
+    if isinstance(base, dict) and isinstance(override, dict):
+        for k, v in override.items():
+            if k in base:
+                if isinstance(base[k], list) and isinstance(v, list):
+                    base[k].extend(v)
+                elif isinstance(base[k], dict) and isinstance(v, dict):
+                    deep_merge(base[k], v)
                 else:
-                    # Merge result dicts
-                    if isinstance(base.get('result'), dict) and isinstance(obj.get('result'), dict):
-                        base['result'].update(obj['result'])
-                    else:
-                        base.update(obj)
+                    base[k] = v
             else:
-                others.append(obj)
-        if base is None:
-            # No object with 'result', merge all into one
-            base = {}
-            for obj in objects:
-                base.update(obj)
-        else:
-            # Merge others into base
-            for other in others:
-                base.update(other)
+                base[k] = v
         return base
+    else:
+        return override
 
-    # Strategy 3: Fallback to outermost extraction (already tried in strategy 1)
-    return None
+def extract_json_from_text(text):
+    """Extract the full JSON using multiple strategies, prioritizing the largest valid object."""
+    # Strategy 1: Clean and try to parse the whole thing
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end+1]
+        try:
+            return json.loads(candidate)
+        except:
+            pass
+
+    # Strategy 2: Extract all objects, choose the largest that contains 'result' if any, else largest.
+    objects = extract_all_balanced(text)
+    if not objects:
+        return None
+
+    # Separate objects by whether they contain 'result'
+    with_result = [(obj, length) for obj, length in objects if 'result' in obj]
+    without_result = [(obj, length) for obj, length in objects if 'result' not in obj]
+
+    # Choose base: if any with 'result', pick the largest among them; else pick the largest overall
+    if with_result:
+        base_obj, _ = max(with_result, key=lambda x: x[1])
+    else:
+        base_obj, _ = max(objects, key=lambda x: x[1])
+
+    # Merge all other objects into base (including those with 'result' if base doesn't have it)
+    for obj, _ in objects:
+        if obj is not base_obj:
+            base_obj = deep_merge(base_obj, obj)
+
+    return base_obj
 
 def replace_tags_recursive(obj):
     if isinstance(obj, dict):
@@ -420,7 +425,7 @@ def query_bot_sync(command_text, group_type):
         logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
 
         bot_replies = []
-        for attempt in range(12):  # 12 attempts = 24 seconds
+        for attempt in range(12):
             await asyncio.sleep(2)
             async for msg in client.iter_messages(group.id, limit=100):
                 if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
