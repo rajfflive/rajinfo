@@ -93,7 +93,7 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- DB HELPERS ----------
+# ---------- DB HELPERS (unchanged) ----------
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -246,7 +246,6 @@ async def start_account(account_data):
     logger.info(f"✅ Account {account_data['name']} (ID: {acc_id}) connected")
     account_clients[acc_id] = client
 
-    # Fetch groups
     try:
         GROUP_MAIN = await client.get_entity(GROUP_MAIN_NAME)
         logger.info(f"✅ Main group: {GROUP_MAIN.title}")
@@ -267,7 +266,6 @@ async def start_account(account_data):
                 logger.info(f"✅ Other group via dialog: {GROUP_OTHER.title}")
                 break
 
-    # Fetch bot ID
     try:
         bot_entity = await client.get_entity(BOT_USERNAME)
         BOT_ID = bot_entity.id
@@ -275,7 +273,6 @@ async def start_account(account_data):
     except:
         logger.warning(f"⚠️ Could not fetch bot {BOT_USERNAME}")
 
-    # Send startup message
     if GROUP_OTHER:
         try:
             await client.send_message(GROUP_OTHER, "Started ✅")
@@ -283,13 +280,10 @@ async def start_account(account_data):
         except Exception as e:
             logger.error(f"Startup message failed: {e}")
 
-    # Event handler – still useful for other purposes
     @client.on(events.NewMessage)
     async def handler(event):
-        # Just log messages for debugging; we'll use polling for actual response
         if event.sender_id == BOT_ID:
             logger.info(f"📩 Bot message seen: {event.raw_text[:50]}...")
-        # We won't use this for response gathering, only logging
 
     await client.run_until_disconnected()
 
@@ -306,7 +300,6 @@ def init_accounts():
         thread.start()
         time.sleep(2)
     if not accounts:
-        logger.info("Loading accounts from env...")
         i = 1
         while True:
             name = os.environ.get(f"ACCOUNT{i}_NAME")
@@ -338,32 +331,31 @@ def query_bot_sync(command_text, group_type):
         return {"error": f"Group '{group_type}' not found"}
 
     async def do_query():
-        # Send command
         sent = await client.send_message(group, command_text)
         msg_id = sent.id
         logger.info(f"📤 Sent {command_text} (msg_id: {msg_id})")
 
-        # Wait for bot to reply (allow up to 10 seconds)
-        await asyncio.sleep(6)
+        # Wait for bot replies (allow up to 8 seconds)
+        await asyncio.sleep(8)
 
         # Fetch recent messages (limit 30) from the group
         bot_replies = []
         async for msg in client.iter_messages(group, limit=30):
-            # Check if message is from bot and is a reply to our command
             if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
                 bot_replies.append(msg)
-            # Also check if message is from bot and contains the target number (as fallback)
+            # Fallback: if reply_to is missing but message contains target number
             elif msg.sender_id == BOT_ID and command_text.split()[1] in msg.raw_text:
                 bot_replies.append(msg)
 
         if not bot_replies:
-            # No replies found
             await client.delete_messages(group, [msg_id])
             return {"error": "Bot did not respond"}
 
-        # Sort by date (oldest first) to combine parts correctly
+        # Sort by date (oldest first) to preserve part order
         bot_replies.sort(key=lambda m: m.date)
-        combined_text = "\n".join([msg.raw_text for msg in bot_replies])
+
+        # Combine raw text of all replies WITHOUT adding extra separators
+        combined_text = "".join([msg.raw_text for msg in bot_replies])
 
         # Extract JSON from combined text
         start = combined_text.find('{')
@@ -376,11 +368,10 @@ def query_bot_sync(command_text, group_type):
         try:
             data = json.loads(json_str)
         except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {e}")
+            logger.error(f"JSON decode error: {e}\nJSON string: {json_str[:500]}")
             await client.delete_messages(group, [msg_id] + [m.id for m in bot_replies])
             return {"error": f"Invalid JSON: {str(e)}"}
 
-        # Add developer tag
         data["developer"] = DEVELOPER_TAG
 
         # Delete command and all bot replies
@@ -390,7 +381,6 @@ def query_bot_sync(command_text, group_type):
 
         return data
 
-    # Run the async function on the correct loop
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
         return future.result(timeout=25)
@@ -661,7 +651,6 @@ def admin_add_account():
     if not all([name, api_id, api_hash, session_string]):
         return "All fields required", 400
     add_account(name, api_id, api_hash, session_string)
-    # add to runtime
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT id FROM accounts WHERE name=? AND api_id=? AND active=1 ORDER BY id DESC LIMIT 1", (name, api_id))
