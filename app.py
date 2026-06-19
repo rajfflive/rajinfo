@@ -311,7 +311,7 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= JSON EXTRACTION =================
+# ================= JSON EXTRACTION (ROBUST) =================
 def extract_outer_json(text):
     """Find the outermost balanced JSON object."""
     start = text.find('{')
@@ -409,10 +409,8 @@ def query_bot_sync(command_text, group_type):
         # Try to extract the outer JSON
         json_str = extract_outer_json(combined_text)
         if json_str is None:
-            # fallback: try to extract multiple and merge
-            # use the existing extraction method
+            # fallback: extract multiple objects and merge with array extending
             objects = []
-            # quick and dirty extraction of all {} blocks
             i = 0
             while i < len(combined_text):
                 if combined_text[i] == '{':
@@ -449,7 +447,7 @@ def query_bot_sync(command_text, group_type):
                 await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
                 return {"error": "JSON parsing failed"}
 
-        # Replace tags
+        # Replace tags recursively
         data = replace_tags_recursive(data)
         data["developer"] = DEVELOPER_TAG
         data["tag"] = DEVELOPER_TAG
