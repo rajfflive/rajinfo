@@ -17,13 +17,20 @@ logger = logging.getLogger(__name__)
 
 # ================= ENVIRONMENT =================
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
-PERMANENT_KEY = "rajinfo"
+PERMANENT_KEY = "felix_unlimited_2024"
 DEVELOPER_TAG = "@rajfflive"
 CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
 
-# ================= GROUP IDs =================
-GROUP_MAIN = -1003877631708
-GROUP_OTHER = -1003967687583
+# ================= GROUP NAMES =================
+# Special commands group (upiinfo, fam, family, pan, tg, leak)
+GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
+# Other commands group (num, veh, vnum, insta, ip, email, ifsc, adhar, imei, pak, gst, bomber, statu)
+GROUP_OTHER_NAME = "TGTOINFO"
+
+GROUP_MAIN = None
+GROUP_OTHER = None
+
+# Commands that go to GROUP_MAIN
 SPECIAL_COMMANDS = ["upiinfo", "fam", "family", "pan", "tg", "leak"]
 
 # ================= CACHE =================
@@ -130,6 +137,7 @@ def get_all_accounts():
     conn.close()
     return [{"id": r[0], "name": r[1], "api_id": r[2], "active": bool(r[3])} for r in rows]
 
+# API Keys
 def add_api_key(key, name, owner, expiry_days, daily_limit, unlimited=0):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -228,6 +236,7 @@ def get_next_account():
     return accounts[account_index]
 
 async def start_account(account_data):
+    global GROUP_MAIN, GROUP_OTHER
     acc_id = account_data['id']
     api_id = account_data['api_id']
     api_hash = account_data['api_hash']
@@ -237,7 +246,48 @@ async def start_account(account_data):
     logger.info(f"✅ Account {account_data['name']} (ID: {acc_id}) connected")
     account_clients[acc_id] = client
 
-    @client.on(events.NewMessage(chats=[GROUP_MAIN, GROUP_OTHER]))
+    # Fetch main group (USERSXINFO CHEATING GC)
+    try:
+        GROUP_MAIN = await client.get_entity(GROUP_MAIN_NAME)
+        logger.info(f"✅ Main group found: {GROUP_MAIN.title} (id: {GROUP_MAIN.id})")
+    except Exception as e:
+        logger.error(f"❌ Could not find main group '{GROUP_MAIN_NAME}': {e}")
+        # Try to find by iterating dialogs
+        try:
+            async for dialog in client.iter_dialogs():
+                if dialog.name == GROUP_MAIN_NAME:
+                    GROUP_MAIN = dialog.entity
+                    logger.info(f"✅ Main group found via dialog: {GROUP_MAIN.title}")
+                    break
+        except:
+            logger.error(f"❌ Main group '{GROUP_MAIN_NAME}' not found in dialogs")
+
+    # Fetch other group (TGTOINFO)
+    try:
+        GROUP_OTHER = await client.get_entity(GROUP_OTHER_NAME)
+        logger.info(f"✅ Other group found: {GROUP_OTHER.title} (id: {GROUP_OTHER.id})")
+    except Exception as e:
+        logger.error(f"❌ Could not find other group '{GROUP_OTHER_NAME}': {e}")
+        try:
+            async for dialog in client.iter_dialogs():
+                if dialog.name == GROUP_OTHER_NAME:
+                    GROUP_OTHER = dialog.entity
+                    logger.info(f"✅ Other group found via dialog: {GROUP_OTHER.title}")
+                    break
+        except:
+            logger.error(f"❌ Other group '{GROUP_OTHER_NAME}' not found in dialogs")
+
+    # Send startup message to TGTOINFO group
+    if GROUP_OTHER is not None:
+        try:
+            await client.send_message(GROUP_OTHER, "Started ✅")
+            logger.info(f"📢 Sent startup message to {GROUP_OTHER_NAME}")
+        except Exception as e:
+            logger.error(f"❌ Failed to send startup message: {e}")
+    else:
+        logger.warning(f"⚠️ Cannot send startup message: {GROUP_OTHER_NAME} not found")
+
+    @client.on(events.NewMessage(chats=[GROUP_MAIN, GROUP_OTHER] if GROUP_MAIN and GROUP_OTHER else []))
     async def handler(event):
         if event.reply_to_msg_id and event.reply_to_msg_id in pending:
             orig_id = event.reply_to_msg_id
@@ -283,7 +333,7 @@ def init_accounts():
         thread.start()
         time.sleep(2)
     
-    # If no accounts found in DB, load from environment variables (ACCOUNT1_, ACCOUNT2_, etc.)
+    # If no accounts in DB, load from environment variables (ACCOUNT1_, ACCOUNT2_, etc.)
     if not accounts:
         logger.info("📥 No accounts in DB. Loading from environment variables...")
         i = 1
@@ -298,11 +348,10 @@ def init_accounts():
             logger.info(f"📥 Added account {name} from env")
             i += 1
         if i > 1:
-            # Recursive call to load the newly added accounts
             init_accounts()
 
 # ================= QUERY FUNCTION =================
-def query_bot_sync(command_text, group_id):
+def query_bot_sync(command_text, group_id_type):
     account = get_next_account()
     if not account:
         return {"error": "No active Telegram accounts"}
@@ -314,8 +363,17 @@ def query_bot_sync(command_text, group_id):
     if loop is None:
         return {"error": "Account event loop not found"}
 
+    # Determine which group entity to use
+    if group_id_type == "main":
+        group_entity = GROUP_MAIN
+    else:
+        group_entity = GROUP_OTHER
+
+    if group_entity is None:
+        return {"error": f"Group entity not found for {group_id_type}"}
+
     async def do_query():
-        sent = await client.send_message(group_id, command_text)
+        sent = await client.send_message(group_entity, command_text)
         msg_id = sent.id
         fut = asyncio.get_event_loop().create_future()
         pending[msg_id] = {"future": fut, "collected": [], "timer": None, "reply_ids": []}
@@ -324,7 +382,7 @@ def query_bot_sync(command_text, group_id):
             return result
         except asyncio.TimeoutError:
             if msg_id in pending:
-                await client.delete_messages(group_id, [msg_id])
+                await client.delete_messages(group_entity, [msg_id])
                 del pending[msg_id]
             return {"error": "Bot did not respond"}
         finally:
@@ -381,8 +439,12 @@ for cmd in ALL_COMMANDS:
                 if "developer" not in cached:
                     cached["developer"] = DEVELOPER_TAG
                 return jsonify(cached)
-            group_id = GROUP_MAIN if cmd in SPECIAL_COMMANDS else GROUP_OTHER
-            result = query_bot_sync(f"/{cmd} {value}", group_id)
+            # Determine which group to use
+            if cmd in SPECIAL_COMMANDS:
+                group_type = "main"
+            else:
+                group_type = "other"
+            result = query_bot_sync(f"/{cmd} {value}", group_type)
             if "developer" not in result:
                 result["developer"] = DEVELOPER_TAG
             set_cache(cmd, value, result)
@@ -394,7 +456,7 @@ for cmd in ALL_COMMANDS:
 @app.route('/statu', methods=['GET'])
 @require_api_key
 def statu_endpoint():
-    result = query_bot_sync("/statu", GROUP_OTHER)
+    result = query_bot_sync("/statu", "other")
     if "developer" not in result:
         result["developer"] = DEVELOPER_TAG
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
