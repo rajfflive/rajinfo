@@ -51,7 +51,7 @@ def clear_cache():
     global response_cache
     response_cache.clear()
 
-# ================= DATABASE =================
+# ================= DATABASE (unchanged) =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -311,64 +311,40 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= ROBUST JSON EXTRACTION =================
-def deep_merge(base, override):
-    """Deep merge two dictionaries, override wins."""
-    for key, value in override.items():
-        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
-            deep_merge(base[key], value)
-        else:
-            base[key] = value
-    return base
-
-def extract_and_merge_json(text):
-    """
-    Extract all JSON objects from text using a stack and merge them deeply.
-    Returns the merged dict or None.
-    """
-    # Find first '{' and last '}'
+# ================= JSON EXTRACTION =================
+def extract_outer_json(text):
+    """Find the outermost balanced JSON object."""
     start = text.find('{')
-    end = text.rfind('}')
-    if start == -1 or end == -1 or end <= start:
+    if start == -1:
         return None
-    # Trim to the outermost
-    text = text[start:end+1]
-
-    # Extract all balanced JSON objects
-    objects = []
-    i = 0
-    while i < len(text):
+    depth = 0
+    for i in range(start, len(text)):
         if text[i] == '{':
-            depth = 0
-            j = i
-            while j < len(text):
-                if text[j] == '{':
-                    depth += 1
-                elif text[j] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[i:j+1]
-                        try:
-                            obj = json.loads(candidate)
-                            objects.append(obj)
-                            i = j
-                            break
-                        except:
-                            pass
-                j += 1
-        i += 1
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i+1]
+    return None
 
-    if not objects:
-        return None
-
-    # Merge all objects
-    merged = {}
-    for obj in objects:
-        deep_merge(merged, obj)
-    return merged
+def deep_merge_arrays(base, override):
+    """Deep merge, but if both have lists, extend the list."""
+    if isinstance(base, dict) and isinstance(override, dict):
+        for key, value in override.items():
+            if key in base:
+                if isinstance(base[key], list) and isinstance(value, list):
+                    base[key].extend(value)
+                elif isinstance(base[key], dict) and isinstance(value, dict):
+                    deep_merge_arrays(base[key], value)
+                else:
+                    base[key] = value
+            else:
+                base[key] = value
+        return base
+    else:
+        return override
 
 def replace_tags_recursive(obj):
-    """Recursively replace all 'tag' and 'developer' keys with DEVELOPER_TAG."""
     if isinstance(obj, dict):
         new_obj = {}
         for k, v in obj.items():
@@ -404,7 +380,7 @@ def query_bot_sync(command_text, group_type):
         logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
 
         bot_replies = []
-        for attempt in range(10):  # 10 attempts = 20 seconds
+        for attempt in range(10):
             await asyncio.sleep(2)
             async for msg in client.iter_messages(group.id, limit=80):
                 if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
@@ -420,7 +396,6 @@ def query_bot_sync(command_text, group_type):
             await client.delete_messages(group.id, [msg_id])
             return {"error": "Bot did not respond"}
 
-        # Deduplicate and sort
         seen = set()
         unique_replies = []
         for msg in bot_replies:
@@ -429,36 +404,61 @@ def query_bot_sync(command_text, group_type):
                 unique_replies.append(msg)
         unique_replies.sort(key=lambda m: m.date)
 
-        # Combine raw text of all replies
         combined_text = "".join([msg.raw_text for msg in unique_replies])
 
-        # Extract and merge JSON objects
-        merged_data = extract_and_merge_json(combined_text)
-        if merged_data is None:
-            # Fallback: try to extract a single JSON using outermost braces
-            # Already done inside extract_and_merge_json, but we can try a simpler approach
-            # Just try to parse the whole text after cleaning
-            cleaned = combined_text.strip()
-            try:
-                data = json.loads(cleaned)
-                merged_data = data
-            except:
+        # Try to extract the outer JSON
+        json_str = extract_outer_json(combined_text)
+        if json_str is None:
+            # fallback: try to extract multiple and merge
+            # use the existing extraction method
+            objects = []
+            # quick and dirty extraction of all {} blocks
+            i = 0
+            while i < len(combined_text):
+                if combined_text[i] == '{':
+                    depth = 0
+                    j = i
+                    while j < len(combined_text):
+                        if combined_text[j] == '{':
+                            depth += 1
+                        elif combined_text[j] == '}':
+                            depth -= 1
+                            if depth == 0:
+                                candidate = combined_text[i:j+1]
+                                try:
+                                    obj = json.loads(candidate)
+                                    objects.append(obj)
+                                except:
+                                    pass
+                                i = j
+                                break
+                        j += 1
+                i += 1
+            if objects:
+                merged = {}
+                for obj in objects:
+                    merged = deep_merge_arrays(merged, obj)
+                data = merged
+            else:
                 await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
                 return {"error": "No valid JSON found"}
+        else:
+            try:
+                data = json.loads(json_str)
+            except:
+                await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
+                return {"error": "JSON parsing failed"}
 
-        # Replace all tag and developer keys recursively
-        merged_data = replace_tags_recursive(merged_data)
+        # Replace tags
+        data = replace_tags_recursive(data)
+        data["developer"] = DEVELOPER_TAG
+        data["tag"] = DEVELOPER_TAG
 
-        # Ensure top-level tags exist
-        merged_data["developer"] = DEVELOPER_TAG
-        merged_data["tag"] = DEVELOPER_TAG
-
-        # Delete command and all bot replies
         to_delete = [msg_id] + [m.id for m in unique_replies]
         await client.delete_messages(group.id, to_delete)
         logger.info(f"🗑️ Deleted {len(to_delete)} messages")
 
-        return merged_data
+        return data
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
