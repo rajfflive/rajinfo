@@ -51,7 +51,7 @@ def clear_cache():
     global response_cache
     response_cache.clear()
 
-# ================= DATABASE (unchanged) =================
+# ================= DATABASE =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -311,88 +311,52 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= ROBUST JSON EXTRACTION =================
+# ================= JSON EXTRACTION & CLEANING =================
 def extract_json_from_text(text):
-    """Try multiple strategies to extract valid JSON."""
-    if not text:
-        return None
-
-    # Strategy 1: find first '{' and last '}', extract and parse
+    """Extract the outermost JSON object from combined text."""
     start = text.find('{')
     end = text.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        candidate = text[start:end+1]
-        try:
-            return json.loads(candidate)
-        except:
-            pass
-
-    # Strategy 2: extract all balanced JSON objects, pick the one with 'result' or the longest
-    objects = []
-    i = 0
-    while i < len(text):
-        if text[i] == '{':
-            depth = 0
-            j = i
-            while j < len(text):
-                if text[j] == '{':
-                    depth += 1
-                elif text[j] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[i:j+1]
-                        try:
-                            obj = json.loads(candidate)
-                            objects.append((candidate, obj))
-                            i = j
-                            break
-                        except:
-                            pass
-                j += 1
-        i += 1
-
-    if not objects:
+    if start == -1 or end == -1 or end <= start:
+        return None
+    candidate = text[start:end+1]
+    try:
+        return json.loads(candidate)
+    except:
         return None
 
-    # Pick the object with 'result' if any, else the longest
-    best = None
-    for cand, obj in objects:
-        if 'result' in obj:
-            best = (cand, obj)
-            break
-    if best is None:
-        # pick longest by character count
-        best = max(objects, key=lambda x: len(x[0]))
-
-    # Merge all other objects into best (to catch any stray parts)
-    for cand, obj in objects:
-        if obj is not best[1]:
-            if isinstance(obj, dict) and isinstance(best[1], dict):
-                for k, v in obj.items():
-                    if k in best[1]:
-                        if isinstance(best[1][k], list) and isinstance(v, list):
-                            best[1][k].extend(v)
-                        elif isinstance(best[1][k], dict) and isinstance(v, dict):
-                            best[1][k].update(v)
-                        else:
-                            best[1][k] = v
-                    else:
-                        best[1][k] = v
-    return best[1]
-
-def replace_tags_recursive(obj):
+def clean_response(obj):
+    """Remove unwanted keys recursively and force developer/tag."""
     if isinstance(obj, dict):
+        # List of keys to remove
+        remove_keys = ['developer_credits', 'telegram_channel', 'telegram_id']
         new_obj = {}
         for k, v in obj.items():
+            # Skip keys we want to remove
+            if k in remove_keys:
+                continue
+            # Recursively clean values
+            cleaned_val = clean_response(v)
+            # If key is 'developer' or 'tag', we'll replace later; but we keep for now
             if k.lower() in ('tag', 'developer'):
+                # We'll set to DEVELOPER_TAG in final pass
                 new_obj[k] = DEVELOPER_TAG
             else:
-                new_obj[k] = replace_tags_recursive(v)
+                new_obj[k] = cleaned_val
         return new_obj
     elif isinstance(obj, list):
-        return [replace_tags_recursive(item) for item in obj]
+        return [clean_response(item) for item in obj]
     else:
         return obj
+
+def finalize_response(data):
+    """Apply cleaning and force developer/tag at top level."""
+    if data is None:
+        return None
+    cleaned = clean_response(data)
+    # Force top-level developer and tag
+    cleaned['developer'] = DEVELOPER_TAG
+    cleaned['tag'] = DEVELOPER_TAG
+    return cleaned
 
 # ================= QUERY FUNCTION =================
 def query_bot_sync(command_text, group_type):
@@ -416,7 +380,7 @@ def query_bot_sync(command_text, group_type):
         logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
 
         bot_replies = []
-        for attempt in range(15):  # 15 attempts = 30 seconds
+        for attempt in range(15):
             await asyncio.sleep(2)
             async for msg in client.iter_messages(group.id, limit=150):
                 if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
@@ -447,15 +411,14 @@ def query_bot_sync(command_text, group_type):
             await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
             return {"error": "No valid JSON found"}
 
-        data = replace_tags_recursive(data)
-        data["developer"] = DEVELOPER_TAG
-        data["tag"] = DEVELOPER_TAG
+        # Clean the response
+        cleaned = finalize_response(data)
 
         to_delete = [msg_id] + [m.id for m in unique_replies]
         await client.delete_messages(group.id, to_delete)
         logger.info(f"🗑️ Deleted {len(to_delete)} messages")
 
-        return data
+        return cleaned
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
@@ -504,16 +467,11 @@ for cmd in ALL_COMMANDS:
         def endpoint(value):
             cached = get_cached(cmd, value)
             if cached is not None:
-                cached = replace_tags_recursive(cached)
-                cached["developer"] = DEVELOPER_TAG
-                cached["tag"] = DEVELOPER_TAG
+                cached = finalize_response(cached)
                 log_usage(request.api_key, cmd, value, json.dumps(cached), True, None)
                 return jsonify(cached)
             group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
             result = query_bot_sync(f"/{cmd} {value}", group_type)
-            result = replace_tags_recursive(result)
-            result["developer"] = DEVELOPER_TAG
-            result["tag"] = DEVELOPER_TAG
             if "error" not in result:
                 set_cache(cmd, value, result)
             log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
@@ -525,9 +483,7 @@ for cmd in ALL_COMMANDS:
 @require_api_key
 def statu_endpoint():
     result = query_bot_sync("/statu", "other")
-    result = replace_tags_recursive(result)
-    result["developer"] = DEVELOPER_TAG
-    result["tag"] = DEVELOPER_TAG
+    result = finalize_response(result)
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     return jsonify(result)
 
