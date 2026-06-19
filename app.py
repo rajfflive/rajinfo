@@ -51,7 +51,7 @@ def clear_cache():
     global response_cache
     response_cache.clear()
 
-# ================= DATABASE =================
+# ================= DATABASE (unchanged) =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -311,18 +311,74 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= SIMPLE JSON EXTRACTION =================
+# ================= ROBUST JSON EXTRACTION =================
 def extract_json_from_text(text):
-    """Extract the outermost JSON object from first '{' to last '}'."""
+    """Try multiple strategies to extract valid JSON."""
+    if not text:
+        return None
+
+    # Strategy 1: find first '{' and last '}', extract and parse
     start = text.find('{')
     end = text.rfind('}')
-    if start == -1 or end == -1 or end <= start:
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end+1]
+        try:
+            return json.loads(candidate)
+        except:
+            pass
+
+    # Strategy 2: extract all balanced JSON objects, pick the one with 'result' or the longest
+    objects = []
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            depth = 0
+            j = i
+            while j < len(text):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[i:j+1]
+                        try:
+                            obj = json.loads(candidate)
+                            objects.append((candidate, obj))
+                            i = j
+                            break
+                        except:
+                            pass
+                j += 1
+        i += 1
+
+    if not objects:
         return None
-    candidate = text[start:end+1]
-    try:
-        return json.loads(candidate)
-    except:
-        return None
+
+    # Pick the object with 'result' if any, else the longest
+    best = None
+    for cand, obj in objects:
+        if 'result' in obj:
+            best = (cand, obj)
+            break
+    if best is None:
+        # pick longest by character count
+        best = max(objects, key=lambda x: len(x[0]))
+
+    # Merge all other objects into best (to catch any stray parts)
+    for cand, obj in objects:
+        if obj is not best[1]:
+            if isinstance(obj, dict) and isinstance(best[1], dict):
+                for k, v in obj.items():
+                    if k in best[1]:
+                        if isinstance(best[1][k], list) and isinstance(v, list):
+                            best[1][k].extend(v)
+                        elif isinstance(best[1][k], dict) and isinstance(v, dict):
+                            best[1][k].update(v)
+                        else:
+                            best[1][k] = v
+                    else:
+                        best[1][k] = v
+    return best[1]
 
 def replace_tags_recursive(obj):
     if isinstance(obj, dict):
@@ -360,9 +416,9 @@ def query_bot_sync(command_text, group_type):
         logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
 
         bot_replies = []
-        for attempt in range(12):
+        for attempt in range(15):  # 15 attempts = 30 seconds
             await asyncio.sleep(2)
-            async for msg in client.iter_messages(group.id, limit=100):
+            async for msg in client.iter_messages(group.id, limit=150):
                 if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
                     bot_replies.append(msg)
                     logger.info(f"📩 Found reply (attempt {attempt+1})")
@@ -403,7 +459,7 @@ def query_bot_sync(command_text, group_type):
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
-        return future.result(timeout=40)
+        return future.result(timeout=50)
     except asyncio.TimeoutError:
         return {"error": "Request timed out"}
     except Exception as e:
@@ -475,7 +531,7 @@ def statu_endpoint():
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     return jsonify(result)
 
-# ================= ADMIN PANEL =================
+# ================= ADMIN PANEL (unchanged) =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
