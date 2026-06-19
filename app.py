@@ -51,7 +51,7 @@ def clear_cache():
     global response_cache
     response_cache.clear()
 
-# ================= DATABASE =================
+# ================= DATABASE (unchanged) =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -92,7 +92,7 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- DB HELPERS ----------
+# ---------- DB HELPERS (unchanged) ----------
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -221,7 +221,7 @@ def delete_key(key):
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
 
-# ================= TELEGRAM ACCOUNT MANAGER =================
+# ================= TELEGRAM ACCOUNT MANAGER (unchanged) =================
 accounts = []
 account_clients = {}
 telegram_loops = {}
@@ -311,9 +311,41 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= BULLETPROOF JSON EXTRACTION =================
-def extract_all_balanced(text):
-    """Extract all balanced JSON objects from text, return list of (obj, length)."""
+# ================= SIMPLE AND ROBUST JSON EXTRACTION =================
+def extract_outer_json(text):
+    """Extract the outermost balanced JSON object using a stack."""
+    start = text.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i+1]
+                try:
+                    return json.loads(candidate)
+                except:
+                    return None
+    return None
+
+def merge_json_objects(objects):
+    """Deep merge multiple JSON objects (simple update)."""
+    merged = {}
+    for obj in objects:
+        merged.update(obj)
+    return merged
+
+def extract_json_from_text(text):
+    """Extract the full JSON, prioritizing the outermost object."""
+    # First try to get the outermost object
+    data = extract_outer_json(text)
+    if data is not None:
+        return data
+
+    # Fallback: extract all objects and merge them
     objects = []
     i = 0
     while i < len(text):
@@ -329,65 +361,16 @@ def extract_all_balanced(text):
                         candidate = text[i:j+1]
                         try:
                             obj = json.loads(candidate)
-                            objects.append((obj, len(candidate)))
+                            objects.append(obj)
                             i = j
                             break
                         except:
                             pass
                 j += 1
         i += 1
-    return objects
-
-def deep_merge(base, override):
-    """Deep merge with array extension."""
-    if isinstance(base, dict) and isinstance(override, dict):
-        for k, v in override.items():
-            if k in base:
-                if isinstance(base[k], list) and isinstance(v, list):
-                    base[k].extend(v)
-                elif isinstance(base[k], dict) and isinstance(v, dict):
-                    deep_merge(base[k], v)
-                else:
-                    base[k] = v
-            else:
-                base[k] = v
-        return base
-    else:
-        return override
-
-def extract_json_from_text(text):
-    """Extract the full JSON using multiple strategies, prioritizing the largest valid object."""
-    # Strategy 1: Clean and try to parse the whole thing
-    start = text.find('{')
-    end = text.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        candidate = text[start:end+1]
-        try:
-            return json.loads(candidate)
-        except:
-            pass
-
-    # Strategy 2: Extract all objects, choose the largest that contains 'result' if any, else largest.
-    objects = extract_all_balanced(text)
-    if not objects:
-        return None
-
-    # Separate objects by whether they contain 'result'
-    with_result = [(obj, length) for obj, length in objects if 'result' in obj]
-    without_result = [(obj, length) for obj, length in objects if 'result' not in obj]
-
-    # Choose base: if any with 'result', pick the largest among them; else pick the largest overall
-    if with_result:
-        base_obj, _ = max(with_result, key=lambda x: x[1])
-    else:
-        base_obj, _ = max(objects, key=lambda x: x[1])
-
-    # Merge all other objects into base (including those with 'result' if base doesn't have it)
-    for obj, _ in objects:
-        if obj is not base_obj:
-            base_obj = deep_merge(base_obj, obj)
-
-    return base_obj
+    if objects:
+        return merge_json_objects(objects)
+    return None
 
 def replace_tags_recursive(obj):
     if isinstance(obj, dict):
