@@ -6,6 +6,7 @@ import secrets
 import threading
 import time
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
@@ -92,7 +93,6 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- DB HELPERS ----------
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -311,54 +311,101 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= JSON EXTRACTION & CLEANING =================
+# ================= FIXED: ROBUST RESPONSE COLLECTION =================
 def extract_json_from_text(text):
-    """Extract the outermost JSON object from combined text."""
+    """Try multiple strategies to extract valid JSON - improved version."""
+    if not text:
+        return None
+
+    # Strategy 1: find first '{' and last '}', extract and parse
     start = text.find('{')
     end = text.rfind('}')
-    if start == -1 or end == -1 or end <= start:
-        return None
-    candidate = text[start:end+1]
-    try:
-        return json.loads(candidate)
-    except:
+    if start != -1 and end != -1 and end > start:
+        # First, try to clean up common formatting issues
+        candidate = text[start:end+1]
+        # Fix single quotes to double quotes
+        candidate = re.sub(r"(?<!\\)'(.*?)(?<!\\)'", r'"\1"', candidate)
+        # Fix trailing commas before closing braces
+        candidate = re.sub(r',\s*}', '}', candidate)
+        candidate = re.sub(r',\s*]', ']', candidate)
+        try:
+            return json.loads(candidate)
+        except:
+            pass
+
+    # Strategy 2: extract all balanced JSON objects, merge intelligently
+    objects = []
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            depth = 0
+            j = i
+            while j < len(text):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[i:j+1]
+                        # Pre-clean candidate
+                        candidate_clean = re.sub(r",\s*}", "}", candidate)
+                        candidate_clean = re.sub(r",\s*]", "]", candidate_clean)
+                        try:
+                            obj = json.loads(candidate_clean)
+                            objects.append((candidate_clean, obj))
+                            i = j
+                            break
+                        except:
+                            pass
+                j += 1
+        i += 1
+
+    if not objects:
         return None
 
-def clean_response(obj):
-    """Remove unwanted keys recursively and force developer/tag."""
-    if isinstance(obj, dict):
-        # List of keys to remove
-        remove_keys = ['developer_credits', 'telegram_channel', 'telegram_id']
-        new_obj = {}
-        for k, v in obj.items():
-            # Skip keys we want to remove
-            if k in remove_keys:
-                continue
-            # Recursively clean values
-            cleaned_val = clean_response(v)
-            # If key is 'developer' or 'tag', we'll replace later; but we keep for now
-            if k.lower() in ('tag', 'developer'):
-                # We'll set to DEVELOPER_TAG in final pass
-                new_obj[k] = DEVELOPER_TAG
-            else:
-                new_obj[k] = cleaned_val
-        return new_obj
-    elif isinstance(obj, list):
-        return [clean_response(item) for item in obj]
-    else:
-        return obj
+    # Merge all objects - prefer the one with most keys
+    merged = {}
+    for cand, obj in objects:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k not in merged:
+                    merged[k] = v
+                elif isinstance(merged[k], list) and isinstance(v, list):
+                    merged[k].extend(v)
+                elif isinstance(merged[k], dict) and isinstance(v, dict):
+                    merged[k].update(v)
 
-def finalize_response(data):
-    """Apply cleaning and force developer/tag at top level."""
-    if data is None:
-        return None
-    cleaned = clean_response(data)
-    # Force top-level developer and tag
-    cleaned['developer'] = DEVELOPER_TAG
-    cleaned['tag'] = DEVELOPER_TAG
+    if merged:
+        return merged
+
+    # Fallback: return the largest object
+    best = max(objects, key=lambda x: len(x[1]) if isinstance(x[1], dict) else 0)
+    return best[1]
+
+def clean_raw_text(raw_text):
+    """Clean the raw text before JSON extraction."""
+    if not raw_text:
+        return raw_text
+    # Remove markdown formatting that breaks JSON
+    cleaned = re.sub(r'\*+', '', raw_text)
+    cleaned = re.sub(r'_+', '', cleaned)
+    # Remove HTML tags
+    cleaned = re.sub(r'<[^>]+>', '', cleaned)
+    # Fix unquoted keys (common in Telegram bot JSON)
+    cleaned = re.sub(r'(?<!")(\b[a-zA-Z_][a-zA-Z0-9_]*\b)(?=\s*:)', r'"\1"', cleaned)
     return cleaned
 
-# ================= QUERY FUNCTION =================
+def replace_tags_in_text(text):
+    """Replace tags at the text level before JSON extraction."""
+    if not text:
+        return text
+    # Replace common tag patterns
+    text = re.sub(r'@\w+', DEVELOPER_TAG, text)
+    # Replace common developer/original references
+    text = re.sub(r'(?i)(original|dev(eloper)?|channel|credit)\s*[:@]\s*\S+', r'\1: ' + DEVELOPER_TAG, text)
+    return text
+
+# ================= FIXED: QUERY FUNCTION =================
 def query_bot_sync(command_text, group_type):
     account = get_next_account()
     if not account:
@@ -375,58 +422,155 @@ def query_bot_sync(command_text, group_type):
         return {"error": f"Group '{group_type}' not found"}
 
     async def do_query():
+        # Send the command
         sent = await client.send_message(group.id, command_text)
         msg_id = sent.id
         logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
 
+        # Collect ALL bot replies that are replies to our message
         bot_replies = []
-        for attempt in range(15):
-            await asyncio.sleep(2)
-            async for msg in client.iter_messages(group.id, limit=150):
-                if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
-                    bot_replies.append(msg)
-                    logger.info(f"📩 Found reply (attempt {attempt+1})")
-                elif msg.sender_id == BOT_ID and command_text.split()[1] in msg.raw_text:
-                    bot_replies.append(msg)
-                    logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
-            if bot_replies:
-                break
+        max_wait = 20  # 20 iterations * 1.5s = 30 seconds total
+        last_bot_count = 0
+        stable_iterations = 0
+
+        for attempt in range(max_wait):
+            await asyncio.sleep(1.5)
+            
+            # Get messages after our sent message
+            async for msg in client.iter_messages(
+                group.id, 
+                limit=100,
+                offset_id=sent.id,
+                reverse=True
+            ):
+                # Only messages from the bot that are replies to our message
+                if msg.sender_id == BOT_ID:
+                    # Check if it's a direct reply to our message
+                    is_direct_reply = (hasattr(msg, 'reply_to') and 
+                                       msg.reply_to and 
+                                       msg.reply_to.reply_to_msg_id == msg_id)
+                    
+                    # OR if it contains our command value in some way
+                    contains_cmd = command_text.split()[1] in msg.raw_text if len(command_text.split()) > 1 else False
+                    
+                    if is_direct_reply or contains_cmd:
+                        if msg.id not in [m.id for m in bot_replies]:
+                            bot_replies.append(msg)
+                            logger.info(f"📩 Collected reply message #{len(bot_replies)} (ID: {msg.id}, attempt {attempt+1})")
+
+            # Check if we stopped getting new messages (bot finished)
+            current_count = len(bot_replies)
+            if current_count > 0 and current_count == last_bot_count:
+                stable_iterations += 1
+                if stable_iterations >= 3:  # 3 consecutive checks with no new messages = done
+                    logger.info(f"✅ Bot finished responding after {current_count} messages")
+                    break
+            elif current_count > last_bot_count:
+                stable_iterations = 0
+            
+            last_bot_count = current_count
+
+        if not bot_replies:
+            # Extended fallback: search ALL recent bot messages
+            logger.warning("⚠️ No direct replies found, searching broader...")
+            await asyncio.sleep(3)
+            async for msg in client.iter_messages(group.id, limit=200):
+                if msg.sender_id == BOT_ID:
+                    # Check if message is recent (within last 60 seconds)
+                    if msg.date and (datetime.now(timezone.utc) - msg.date).total_seconds() < 60:
+                        # Check if any part of command text matches
+                        cmd_parts = command_text.split()
+                        for part in cmd_parts:
+                            if len(part) > 2 and part in msg.raw_text:
+                                if msg.id not in [m.id for m in bot_replies]:
+                                    bot_replies.append(msg)
+                                    logger.info(f"📩 Fallback collected reply (ID: {msg.id})")
+                                break
 
         if not bot_replies:
             await client.delete_messages(group.id, [msg_id])
             return {"error": "Bot did not respond"}
 
-        seen = set()
-        unique_replies = []
+        # Sort by date and get all raw text
+        bot_replies.sort(key=lambda m: m.date)
+        
+        all_responses = []
+        combined_text = ""
+        
         for msg in bot_replies:
-            if msg.id not in seen:
-                seen.add(msg.id)
-                unique_replies.append(msg)
-        unique_replies.sort(key=lambda m: m.date)
+            raw = msg.raw_text
+            all_responses.append(raw)
+            combined_text += raw + "\n"
 
-        combined_text = "".join([msg.raw_text for msg in unique_replies])
+        logger.info(f"📄 Combined {len(bot_replies)} messages, total length: {len(combined_text)}")
 
-        data = extract_json_from_text(combined_text)
+        # FIRST: Replace tags at text level
+        combined_text = replace_tags_in_text(combined_text)
+        
+        # SECOND: Clean the text for better JSON extraction
+        cleaned_text = clean_raw_text(combined_text)
+
+        # THIRD: Try JSON extraction
+        data = extract_json_from_text(cleaned_text)
+        
         if data is None:
-            await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
-            return {"error": "No valid JSON found"}
+            # Final attempt: try extracting from each individual message
+            logger.warning("⚠️ Could not extract JSON from combined text, trying individual messages...")
+            for raw_response in all_responses:
+                cleaned_single = clean_raw_text(replace_tags_in_text(raw_response))
+                data = extract_json_from_text(cleaned_single)
+                if data:
+                    break
 
-        # Clean the response
-        cleaned = finalize_response(data)
+        if data is None:
+            await client.delete_messages(group.id, [msg_id] + [m.id for m in bot_replies])
+            return {"error": "No valid JSON found in bot response"}
 
-        to_delete = [msg_id] + [m.id for m in unique_replies]
-        await client.delete_messages(group.id, to_delete)
-        logger.info(f"🗑️ Deleted {len(to_delete)} messages")
+        # FOURTH: Recursively replace any remaining tags in the JSON
+        data = replace_tags_recursive(data)
+        data["developer"] = DEVELOPER_TAG
+        data["tag"] = DEVELOPER_TAG
 
-        return cleaned
+        # Clean up: delete our command and bot replies
+        to_delete = [msg_id] + [m.id for m in bot_replies]
+        try:
+            await client.delete_messages(group.id, to_delete)
+            logger.info(f"🗑️ Deleted {len(to_delete)} messages")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not delete some messages: {e}")
+
+        return data
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
-        return future.result(timeout=50)
+        return future.result(timeout=60)
     except asyncio.TimeoutError:
-        return {"error": "Request timed out"}
+        return {"error": "Request timed out (60s)"}
     except Exception as e:
         return {"error": str(e)}
+
+def replace_tags_recursive(obj):
+    """Recursively replace tags in JSON objects."""
+    if isinstance(obj, dict):
+        new_obj = {}
+        for k, v in obj.items():
+            # Replace tag values at any key level
+            if isinstance(v, str) and ('@' in v):
+                # Check if this looks like a tag/username value
+                if re.match(r'^@?\w+$', v.strip()):
+                    new_obj[k] = DEVELOPER_TAG
+                else:
+                    # Replace any @username within the string
+                    new_obj[k] = re.sub(r'@\w+', DEVELOPER_TAG, v)
+            else:
+                new_obj[k] = replace_tags_recursive(v)
+        return new_obj
+    elif isinstance(obj, list):
+        return [replace_tags_recursive(item) for item in obj]
+    else:
+        if isinstance(obj, str) and '@' in obj:
+            return re.sub(r'@\w+', DEVELOPER_TAG, obj)
+        return obj
 
 # ================= AUTH =================
 def admin_login_required(f):
@@ -467,7 +611,9 @@ for cmd in ALL_COMMANDS:
         def endpoint(value):
             cached = get_cached(cmd, value)
             if cached is not None:
-                cached = finalize_response(cached)
+                cached = replace_tags_recursive(cached)
+                cached["developer"] = DEVELOPER_TAG
+                cached["tag"] = DEVELOPER_TAG
                 log_usage(request.api_key, cmd, value, json.dumps(cached), True, None)
                 return jsonify(cached)
             group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
@@ -483,11 +629,10 @@ for cmd in ALL_COMMANDS:
 @require_api_key
 def statu_endpoint():
     result = query_bot_sync("/statu", "other")
-    result = finalize_response(result)
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     return jsonify(result)
 
-# ================= ADMIN PANEL (unchanged) =================
+# ================= ADMIN PANEL =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
