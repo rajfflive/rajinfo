@@ -92,7 +92,7 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- DB HELPERS (unchanged) ----------
+# ---------- DB HELPERS ----------
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -221,7 +221,7 @@ def delete_key(key):
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
 
-# ================= TELEGRAM ACCOUNT MANAGER (unchanged) =================
+# ================= TELEGRAM ACCOUNT MANAGER =================
 accounts = []
 account_clients = {}
 telegram_loops = {}
@@ -311,42 +311,10 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= SIMPLE AND ROBUST JSON EXTRACTION =================
-def extract_outer_json(text):
-    """Extract the outermost balanced JSON object using a stack."""
-    start = text.find('{')
-    if start == -1:
-        return None
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == '{':
-            depth += 1
-        elif text[i] == '}':
-            depth -= 1
-            if depth == 0:
-                candidate = text[start:i+1]
-                try:
-                    return json.loads(candidate)
-                except:
-                    return None
-    return None
-
-def merge_json_objects(objects):
-    """Deep merge multiple JSON objects (simple update)."""
-    merged = {}
-    for obj in objects:
-        merged.update(obj)
-    return merged
-
+# ================= BULLETPROOF JSON EXTRACTION =================
 def extract_json_from_text(text):
-    """Extract the full JSON, prioritizing the outermost object."""
-    # First try to get the outermost object
-    data = extract_outer_json(text)
-    if data is not None:
-        return data
-
-    # Fallback: extract all objects and merge them
-    objects = []
+    """Extract the largest valid JSON object (likely the full response)."""
+    candidates = []
     i = 0
     while i < len(text):
         if text[i] == '{':
@@ -361,16 +329,44 @@ def extract_json_from_text(text):
                         candidate = text[i:j+1]
                         try:
                             obj = json.loads(candidate)
-                            objects.append(obj)
+                            candidates.append((candidate, obj))
                             i = j
                             break
                         except:
                             pass
                 j += 1
         i += 1
-    if objects:
-        return merge_json_objects(objects)
-    return None
+
+    if not candidates:
+        return None
+
+    # Pick the candidate with 'result' (if any) else the longest
+    best_candidate = None
+    best_obj = None
+    for cand, obj in candidates:
+        if 'result' in obj:
+            best_candidate = cand
+            best_obj = obj
+            break
+    if best_obj is None:
+        # pick longest
+        best_candidate, best_obj = max(candidates, key=lambda x: len(x[0]))
+
+    # Merge all other candidates into best (to catch any stray parts)
+    for cand, obj in candidates:
+        if obj is not best_obj:
+            if isinstance(obj, dict) and isinstance(best_obj, dict):
+                for k, v in obj.items():
+                    if k in best_obj:
+                        if isinstance(best_obj[k], list) and isinstance(v, list):
+                            best_obj[k].extend(v)
+                        elif isinstance(best_obj[k], dict) and isinstance(v, dict):
+                            best_obj[k].update(v)
+                        else:
+                            best_obj[k] = v
+                    else:
+                        best_obj[k] = v
+    return best_obj
 
 def replace_tags_recursive(obj):
     if isinstance(obj, dict):
