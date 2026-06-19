@@ -6,6 +6,7 @@ import secrets
 import threading
 import time
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
@@ -311,7 +312,41 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= QUERY FUNCTION (POLLING + SINGLE JSON EXTRACTION) =================
+# ================= JSON EXTRACTION UTILITIES =================
+def extract_outer_json(text):
+    """Find the outermost JSON object starting from first '{' to last '}'."""
+    start = text.find('{')
+    if start == -1:
+        return None
+    # Find the matching closing brace using a stack
+    stack = []
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            stack.append(i)
+        elif text[i] == '}':
+            if stack:
+                stack.pop()
+                if not stack:
+                    # Found the outermost closing brace
+                    return text[start:i+1]
+    return None
+
+def replace_tags_recursive(obj):
+    """Recursively replace all 'tag' and 'developer' keys with DEVELOPER_TAG."""
+    if isinstance(obj, dict):
+        new_obj = {}
+        for k, v in obj.items():
+            if k.lower() in ['tag', 'developer']:
+                new_obj[k] = DEVELOPER_TAG
+            else:
+                new_obj[k] = replace_tags_recursive(v)
+        return new_obj
+    elif isinstance(obj, list):
+        return [replace_tags_recursive(item) for item in obj]
+    else:
+        return obj
+
+# ================= QUERY FUNCTION =================
 def query_bot_sync(command_text, group_type):
     account = get_next_account()
     if not account:
@@ -333,7 +368,7 @@ def query_bot_sync(command_text, group_type):
         logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
 
         bot_replies = []
-        for attempt in range(6):  # 6 attempts = 12 seconds
+        for attempt in range(8):  # 8 attempts = 16 seconds
             await asyncio.sleep(2)
             async for msg in client.iter_messages(group.id, limit=60):
                 if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
@@ -358,17 +393,15 @@ def query_bot_sync(command_text, group_type):
                 unique_replies.append(msg)
         unique_replies.sort(key=lambda m: m.date)
 
-        # Combine raw text of all replies WITHOUT adding separators
+        # Combine raw text of all replies
         combined_text = "".join([msg.raw_text for msg in unique_replies])
 
-        # Find the complete JSON object
-        start = combined_text.find('{')
-        end = combined_text.rfind('}') + 1
-        if start == -1 or end <= start:
+        # Extract the outermost JSON object
+        json_str = extract_outer_json(combined_text)
+        if json_str is None:
             await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
             return {"error": "No valid JSON found"}
 
-        json_str = combined_text[start:end]
         try:
             data = json.loads(json_str)
         except json.JSONDecodeError as e:
@@ -376,12 +409,12 @@ def query_bot_sync(command_text, group_type):
             await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
             return {"error": f"Invalid JSON: {str(e)}"}
 
-        # Override tags at all levels
+        # Replace all tag and developer keys recursively
+        data = replace_tags_recursive(data)
+
+        # Ensure top-level tags exist
         data["developer"] = DEVELOPER_TAG
         data["tag"] = DEVELOPER_TAG
-        if "result" in data and isinstance(data["result"], dict):
-            data["result"]["developer"] = DEVELOPER_TAG
-            data["result"]["tag"] = DEVELOPER_TAG
 
         # Delete command and all bot replies
         to_delete = [msg_id] + [m.id for m in unique_replies]
@@ -437,22 +470,17 @@ for cmd in ALL_COMMANDS:
         def endpoint(value):
             cached = get_cached(cmd, value)
             if cached is not None:
-                # Ensure cached also has tags
+                cached = replace_tags_recursive(cached)
                 cached["developer"] = DEVELOPER_TAG
                 cached["tag"] = DEVELOPER_TAG
-                if "result" in cached and isinstance(cached["result"], dict):
-                    cached["result"]["developer"] = DEVELOPER_TAG
-                    cached["result"]["tag"] = DEVELOPER_TAG
                 log_usage(request.api_key, cmd, value, json.dumps(cached), True, None)
                 return jsonify(cached)
             group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
             result = query_bot_sync(f"/{cmd} {value}", group_type)
-            # Ensure tags (already done in query, but for safety)
+            # Ensure tags (already done in query, but double-check)
+            result = replace_tags_recursive(result)
             result["developer"] = DEVELOPER_TAG
             result["tag"] = DEVELOPER_TAG
-            if "result" in result and isinstance(result["result"], dict):
-                result["result"]["developer"] = DEVELOPER_TAG
-                result["result"]["tag"] = DEVELOPER_TAG
             if "error" not in result:
                 set_cache(cmd, value, result)
             log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
@@ -464,11 +492,9 @@ for cmd in ALL_COMMANDS:
 @require_api_key
 def statu_endpoint():
     result = query_bot_sync("/statu", "other")
+    result = replace_tags_recursive(result)
     result["developer"] = DEVELOPER_TAG
     result["tag"] = DEVELOPER_TAG
-    if "result" in result and isinstance(result["result"], dict):
-        result["result"]["developer"] = DEVELOPER_TAG
-        result["result"]["tag"] = DEVELOPER_TAG
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     return jsonify(result)
 
