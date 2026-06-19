@@ -93,7 +93,7 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- DB HELPERS ----------
+# ---------- DB HELPERS (unchanged) ----------
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -312,9 +312,9 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= JSON EXTRACTOR =================
+# ================= ROBUST JSON EXTRACTOR =================
 def extract_json_objects(text):
-    """Extract all balanced JSON objects from text and return as list."""
+    """Extract all balanced JSON objects from text and return list."""
     objects = []
     i = 0
     while i < len(text):
@@ -338,6 +338,35 @@ def extract_json_objects(text):
                 j += 1
         i += 1
     return objects
+
+def merge_json_objects(objects):
+    """Merge multiple JSON objects into one, preferring the one with 'result'."""
+    if not objects:
+        return {}
+    # If any object has 'result' key, use that as base and merge others into it
+    result_obj = None
+    others = []
+    for obj in objects:
+        if 'result' in obj:
+            if result_obj is None:
+                result_obj = obj.copy()
+            else:
+                # Merge the result data (deep merge could be needed but we'll just update)
+                if isinstance(result_obj.get('result'), dict) and isinstance(obj.get('result'), dict):
+                    result_obj['result'].update(obj['result'])
+                else:
+                    result_obj.update(obj)
+        else:
+            others.append(obj)
+    if result_obj is None:
+        # No object with 'result', merge all
+        result_obj = {}
+        for obj in objects:
+            result_obj.update(obj)
+    # Merge others into result_obj
+    for other in others:
+        result_obj.update(other)
+    return result_obj
 
 # ================= QUERY FUNCTION (RETRY LOGIC) =================
 def query_bot_sync(command_text, group_type):
@@ -388,20 +417,21 @@ def query_bot_sync(command_text, group_type):
 
         combined_text = "".join([msg.raw_text for msg in unique_replies])
 
-        # Extract all JSON objects from the combined text
+        # Extract all JSON objects
         objects = extract_json_objects(combined_text)
-
         if not objects:
             await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
             return {"error": "No valid JSON objects found"}
 
-        # Merge all objects into one (last key wins)
-        merged = {}
-        for obj in objects:
-            merged.update(obj)
+        # Merge objects intelligently
+        merged = merge_json_objects(objects)
 
-        # Add developer tag
+        # Override tag and developer
+        merged["tag"] = DEVELOPER_TAG
         merged["developer"] = DEVELOPER_TAG
+        # If there's a 'success' key, ensure it's boolean
+        if "success" in merged and isinstance(merged["success"], str):
+            merged["success"] = merged["success"].lower() == "true"
 
         # Delete command and all bot replies
         to_delete = [msg_id] + [m.id for m in unique_replies]
@@ -460,11 +490,17 @@ for cmd in ALL_COMMANDS:
                 log_usage(request.api_key, cmd, value, json.dumps(cached), True, None)
                 if "developer" not in cached:
                     cached["developer"] = DEVELOPER_TAG
+                if "tag" not in cached:
+                    cached["tag"] = DEVELOPER_TAG
                 return jsonify(cached)
             group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
             result = query_bot_sync(f"/{cmd} {value}", group_type)
             if "developer" not in result:
                 result["developer"] = DEVELOPER_TAG
+            if "tag" not in result:
+                result["tag"] = DEVELOPER_TAG
+            else:
+                result["tag"] = DEVELOPER_TAG  # override
             if "error" not in result:
                 set_cache(cmd, value, result)
             log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
@@ -478,6 +514,10 @@ def statu_endpoint():
     result = query_bot_sync("/statu", "other")
     if "developer" not in result:
         result["developer"] = DEVELOPER_TAG
+    if "tag" not in result:
+        result["tag"] = DEVELOPER_TAG
+    else:
+        result["tag"] = DEVELOPER_TAG
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     return jsonify(result)
 
