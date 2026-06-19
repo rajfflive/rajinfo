@@ -22,15 +22,11 @@ DEVELOPER_TAG = "@rajfflive"
 CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
 
 # ================= GROUP NAMES =================
-# Special commands group (upiinfo, fam, family, pan, tg, leak)
 GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
-# Other commands group (num, veh, vnum, insta, ip, email, ifsc, adhar, imei, pak, gst, bomber, statu)
 GROUP_OTHER_NAME = "TGTOINFO"
 
 GROUP_MAIN = None
 GROUP_OTHER = None
-
-# Commands that go to GROUP_MAIN
 SPECIAL_COMMANDS = ["upiinfo", "fam", "family", "pan", "tg", "leak"]
 
 # ================= CACHE =================
@@ -49,6 +45,10 @@ def get_cached(cmd, value):
 def set_cache(cmd, value, data):
     key = f"{cmd}:{value}"
     response_cache[key] = (data, time.time())
+
+def clear_cache():
+    global response_cache
+    response_cache.clear()
 
 # ================= DATABASE =================
 DB_FILE = "felix_api.db"
@@ -91,7 +91,7 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- DB HELPERS ----------
+# ---------- DB HELPERS (unchanged) ----------
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -137,7 +137,6 @@ def get_all_accounts():
     conn.close()
     return [{"id": r[0], "name": r[1], "api_id": r[2], "active": bool(r[3])} for r in rows]
 
-# API Keys
 def add_api_key(key, name, owner, expiry_days, daily_limit, unlimited=0):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -222,10 +221,10 @@ app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
 
 # ================= TELEGRAM ACCOUNT MANAGER =================
-accounts = []          # list of dicts
-account_clients = {}   # acc_id -> client
-telegram_loops = {}    # acc_id -> event loop
-pending = {}           # msg_id -> future data
+accounts = []
+account_clients = {}
+telegram_loops = {}
+pending = {}
 account_index = 0
 
 def get_next_account():
@@ -246,51 +245,45 @@ async def start_account(account_data):
     logger.info(f"✅ Account {account_data['name']} (ID: {acc_id}) connected")
     account_clients[acc_id] = client
 
-    # Fetch main group (USERSXINFO CHEATING GC)
+    # Fetch groups by name
     try:
         GROUP_MAIN = await client.get_entity(GROUP_MAIN_NAME)
-        logger.info(f"✅ Main group found: {GROUP_MAIN.title} (id: {GROUP_MAIN.id})")
-    except Exception as e:
-        logger.error(f"❌ Could not find main group '{GROUP_MAIN_NAME}': {e}")
-        # Try to find by iterating dialogs
-        try:
-            async for dialog in client.iter_dialogs():
-                if dialog.name == GROUP_MAIN_NAME:
-                    GROUP_MAIN = dialog.entity
-                    logger.info(f"✅ Main group found via dialog: {GROUP_MAIN.title}")
-                    break
-        except:
-            logger.error(f"❌ Main group '{GROUP_MAIN_NAME}' not found in dialogs")
+        logger.info(f"✅ Main group: {GROUP_MAIN.title}")
+    except:
+        async for dialog in client.iter_dialogs():
+            if dialog.name == GROUP_MAIN_NAME:
+                GROUP_MAIN = dialog.entity
+                logger.info(f"✅ Main group via dialog: {GROUP_MAIN.title}")
+                break
 
-    # Fetch other group (TGTOINFO)
     try:
         GROUP_OTHER = await client.get_entity(GROUP_OTHER_NAME)
-        logger.info(f"✅ Other group found: {GROUP_OTHER.title} (id: {GROUP_OTHER.id})")
-    except Exception as e:
-        logger.error(f"❌ Could not find other group '{GROUP_OTHER_NAME}': {e}")
-        try:
-            async for dialog in client.iter_dialogs():
-                if dialog.name == GROUP_OTHER_NAME:
-                    GROUP_OTHER = dialog.entity
-                    logger.info(f"✅ Other group found via dialog: {GROUP_OTHER.title}")
-                    break
-        except:
-            logger.error(f"❌ Other group '{GROUP_OTHER_NAME}' not found in dialogs")
+        logger.info(f"✅ Other group: {GROUP_OTHER.title}")
+    except:
+        async for dialog in client.iter_dialogs():
+            if dialog.name == GROUP_OTHER_NAME:
+                GROUP_OTHER = dialog.entity
+                logger.info(f"✅ Other group via dialog: {GROUP_OTHER.title}")
+                break
 
-    # Send startup message to TGTOINFO group
-    if GROUP_OTHER is not None:
+    # Send startup message to TGTOINFO
+    if GROUP_OTHER:
         try:
             await client.send_message(GROUP_OTHER, "Started ✅")
-            logger.info(f"📢 Sent startup message to {GROUP_OTHER_NAME}")
+            logger.info(f"📢 Sent startup to {GROUP_OTHER_NAME}")
         except Exception as e:
-            logger.error(f"❌ Failed to send startup message: {e}")
-    else:
-        logger.warning(f"⚠️ Cannot send startup message: {GROUP_OTHER_NAME} not found")
+            logger.error(f"Startup message failed: {e}")
 
-    @client.on(events.NewMessage(chats=[GROUP_MAIN, GROUP_OTHER] if GROUP_MAIN and GROUP_OTHER else []))
+    # Listen to all messages (no filter) and filter manually
+    @client.on(events.NewMessage)
     async def handler(event):
+        # Only process messages from bot? Actually we need to know the bot's ID.
+        # For simplicity, we check if the message is from the bot account we are using.
+        # But we don't know bot ID. Instead, we check if it's a reply to our command.
         if event.reply_to_msg_id and event.reply_to_msg_id in pending:
             orig_id = event.reply_to_msg_id
+            # Check if this message is from the same group where command was sent? Not necessary.
+            # We'll just collect JSON.
             text = event.raw_text
             start = text.find('{')
             end = text.rfind('}') + 1
@@ -303,7 +296,7 @@ async def start_account(account_data):
             if pending[orig_id]["timer"]:
                 pending[orig_id]["timer"].cancel()
             async def finish():
-                await asyncio.sleep(2)
+                await asyncio.sleep(2)  # wait for second part
                 if orig_id in pending:
                     merged = {}
                     for part in pending[orig_id]["collected"]:
@@ -312,6 +305,7 @@ async def start_account(account_data):
                         merged = {"error": "No JSON data"}
                     merged["developer"] = DEVELOPER_TAG
                     pending[orig_id]["future"].set_result(merged)
+                    # Delete command and all replies
                     pending[orig_id]["reply_ids"].append(event.id)
                     await client.delete_messages(event.chat_id, [orig_id] + pending[orig_id]["reply_ids"])
                     del pending[orig_id]
@@ -321,7 +315,6 @@ async def start_account(account_data):
 
 def init_accounts():
     global accounts
-    # Load from DB
     rows = get_active_accounts()
     for row in rows:
         acc_id, name, api_id, api_hash, session_str = row
@@ -332,10 +325,8 @@ def init_accounts():
         thread = threading.Thread(target=lambda: loop.run_until_complete(start_account(accounts[-1])), daemon=True)
         thread.start()
         time.sleep(2)
-    
-    # If no accounts in DB, load from environment variables (ACCOUNT1_, ACCOUNT2_, etc.)
     if not accounts:
-        logger.info("📥 No accounts in DB. Loading from environment variables...")
+        logger.info("Loading accounts from env...")
         i = 1
         while True:
             name = os.environ.get(f"ACCOUNT{i}_NAME")
@@ -345,13 +336,13 @@ def init_accounts():
             if not all([name, api_id, api_hash, session_str]):
                 break
             add_account(name, int(api_id), api_hash, session_str)
-            logger.info(f"📥 Added account {name} from env")
+            logger.info(f"Added {name} from env")
             i += 1
         if i > 1:
             init_accounts()
 
 # ================= QUERY FUNCTION =================
-def query_bot_sync(command_text, group_id_type):
+def query_bot_sync(command_text, group_type):
     account = get_next_account()
     if not account:
         return {"error": "No active Telegram accounts"}
@@ -361,19 +352,13 @@ def query_bot_sync(command_text, group_id_type):
         return {"error": "Account not ready"}
     loop = telegram_loops.get(acc_id)
     if loop is None:
-        return {"error": "Account event loop not found"}
-
-    # Determine which group entity to use
-    if group_id_type == "main":
-        group_entity = GROUP_MAIN
-    else:
-        group_entity = GROUP_OTHER
-
-    if group_entity is None:
-        return {"error": f"Group entity not found for {group_id_type}"}
+        return {"error": "Event loop not found"}
+    group = GROUP_MAIN if group_type == "main" else GROUP_OTHER
+    if group is None:
+        return {"error": f"Group '{group_type}' not found"}
 
     async def do_query():
-        sent = await client.send_message(group_entity, command_text)
+        sent = await client.send_message(group, command_text)
         msg_id = sent.id
         fut = asyncio.get_event_loop().create_future()
         pending[msg_id] = {"future": fut, "collected": [], "timer": None, "reply_ids": []}
@@ -382,7 +367,7 @@ def query_bot_sync(command_text, group_id_type):
             return result
         except asyncio.TimeoutError:
             if msg_id in pending:
-                await client.delete_messages(group_entity, [msg_id])
+                await client.delete_messages(group, [msg_id])
                 del pending[msg_id]
             return {"error": "Bot did not respond"}
         finally:
@@ -396,7 +381,7 @@ def query_bot_sync(command_text, group_id_type):
     except Exception as e:
         return {"error": str(e)}
 
-# ================= AUTH DECORATORS =================
+# ================= AUTH =================
 def admin_login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -417,7 +402,7 @@ def require_api_key(f):
             return f(*args, **kwargs)
         key_info = get_api_key_info(api_key)
         if not key_info:
-            return jsonify({"error": "Invalid, expired, or inactive API key"}), 401
+            return jsonify({"error": "Invalid/expired/inactive key"}), 401
         if "error" in key_info:
             return jsonify({"error": key_info["error"]}), 403
         increment_daily_usage(api_key)
@@ -439,15 +424,12 @@ for cmd in ALL_COMMANDS:
                 if "developer" not in cached:
                     cached["developer"] = DEVELOPER_TAG
                 return jsonify(cached)
-            # Determine which group to use
-            if cmd in SPECIAL_COMMANDS:
-                group_type = "main"
-            else:
-                group_type = "other"
+            group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
             result = query_bot_sync(f"/{cmd} {value}", group_type)
             if "developer" not in result:
                 result["developer"] = DEVELOPER_TAG
-            set_cache(cmd, value, result)
+            if "error" not in result:
+                set_cache(cmd, value, result)
             log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
             return jsonify(result)
         return endpoint
@@ -462,7 +444,7 @@ def statu_endpoint():
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     return jsonify(result)
 
-# ================= ADMIN PANEL =================
+# ================= ADMIN PANEL (with logs and clear cache) =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -472,7 +454,7 @@ ADMIN_HTML = """
         body { font-family: Arial; margin: 0; padding: 20px; background: #f0f2f5; }
         .container { max-width: 1200px; margin: auto; }
         h1 { color: #1a73e8; }
-        .tabs { display: flex; gap: 10px; margin: 20px 0; }
+        .tabs { display: flex; gap: 10px; margin: 20px 0; flex-wrap: wrap; }
         .tab { padding: 10px 20px; background: white; border-radius: 5px; cursor: pointer; border: 1px solid #ddd; }
         .tab.active { background: #1a73e8; color: white; border-color: #1a73e8; }
         .panel { background: white; padding: 20px; border-radius: 10px; margin-top: 10px; }
@@ -483,6 +465,7 @@ ADMIN_HTML = """
         button { padding: 10px 20px; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; }
         .danger { background: #f44336; }
         .success { background: #4CAF50; }
+        .clear { background: #ff9800; }
     </style>
 </head>
 <body>
@@ -504,6 +487,7 @@ ADMIN_HTML = """
             <button type="submit" class="success">Generate</button>
         </form>
         <hr>
+        <h2>Active API Keys</h2>
         <table>
             <tr><th>Key</th><th>Name</th><th>Expiry</th><th>Daily Limit</th><th>Status</th><th>Actions</th></tr>
             {% for k in keys %}
@@ -521,6 +505,7 @@ ADMIN_HTML = """
             {% endfor %}
         </table>
         <p><strong>Permanent Key:</strong> <code>{{ permanent_key }}</code></p>
+        <p><a href="/admin/clear_cache" class="clear" style="color:white;padding:5px 10px;border-radius:4px;text-decoration:none;">Clear Cache</a> ({{ cache_size }} entries)</p>
     </div>
     <div id="accounts" class="panel" style="display:none;">
         <h2>Add Account</h2>
@@ -532,6 +517,7 @@ ADMIN_HTML = """
             <button type="submit" class="success">Add Account</button>
         </form>
         <hr>
+        <h2>Active Accounts</h2>
         <table>
             <tr><th>ID</th><th>Name</th><th>API ID</th><th>Status</th><th>Actions</th></tr>
             {% for acc in accounts %}
@@ -549,15 +535,16 @@ ADMIN_HTML = """
         </table>
     </div>
     <div id="logs" class="panel" style="display:none;">
-        <h2>Usage Logs</h2>
+        <h2>Usage Logs (last 100)</h2>
         <table>
-            <tr><th>Time</th><th>Key</th><th>Command</th><th>Value</th><th>Success</th></tr>
+            <tr><th>Time</th><th>Key</th><th>Command</th><th>Value</th><th>Response (truncated)</th><th>Success</th></tr>
             {% for log in logs %}
             <tr>
                 <td>{{ log.timestamp[:19] }}</td>
                 <td>{{ log.key[:8] }}...</td>
                 <td>{{ log.command }}</td>
                 <td>{{ log.value }}</td>
+                <td>{{ log.response[:80] }}{% if log.response|length > 80 %}...{% endif %}</td>
                 <td>{{ '✅' if log.success else '❌' }}</td>
             </tr>
             {% endfor %}
@@ -565,10 +552,12 @@ ADMIN_HTML = """
     </div>
     <div id="status" class="panel" style="display:none;">
         <h2>Status</h2>
-        <p>Accounts: {{ accounts|length }}</p>
-        <p>API Keys: {{ keys|length }}</p>
-        <p>Cache Entries: {{ cache_size }}</p>
-        <p>Developer: {{ developer }}</p>
+        <p><strong>Active Accounts:</strong> {{ accounts|length }}</p>
+        <p><strong>API Keys:</strong> {{ keys|length }}</p>
+        <p><strong>Cache Entries:</strong> {{ cache_size }}</p>
+        <p><strong>Developer:</strong> {{ developer }}</p>
+        <p><strong>Main Group (Special):</strong> {{ group_main_name }}</p>
+        <p><strong>Other Group:</strong> {{ group_other_name }}</p>
     </div>
 </div>
 <script>
@@ -601,14 +590,22 @@ def admin_login():
 def admin_dashboard():
     keys = get_all_keys()
     accounts = get_all_accounts()
-    logs = get_usage_logs(50)
+    logs = get_usage_logs(100)
     return render_template_string(ADMIN_HTML,
                                  keys=keys,
                                  accounts=accounts,
                                  logs=logs,
                                  permanent_key=PERMANENT_KEY,
                                  developer=DEVELOPER_TAG,
-                                 cache_size=len(response_cache))
+                                 cache_size=len(response_cache),
+                                 group_main_name=GROUP_MAIN_NAME,
+                                 group_other_name=GROUP_OTHER_NAME)
+
+@app.route('/admin/clear_cache')
+@admin_login_required
+def admin_clear_cache():
+    clear_cache()
+    return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/create_key', methods=['POST'])
 @admin_login_required
