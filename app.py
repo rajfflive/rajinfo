@@ -51,7 +51,7 @@ def clear_cache():
     global response_cache
     response_cache.clear()
 
-# ================= DATABASE =================
+# ================= DATABASE (unchanged) =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -311,23 +311,77 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= SIMPLE JSON EXTRACTION (OUTERMOST) =================
+# ================= ROBUST JSON EXTRACTION =================
 def extract_json_from_text(text):
-    """Extract the outermost balanced JSON object."""
-    start = text.find('{')
-    if start == -1:
+    """Extract JSON using multiple strategies."""
+    if not text:
         return None
-    depth = 0
-    for i in range(start, len(text)):
+
+    # Strategy 1: Try to parse the entire text as JSON (cleaned)
+    # Remove any non-JSON prefix/suffix (like the bot's header/footer)
+    # We'll try to find the first '{' and last '}'
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end+1]
+        try:
+            return json.loads(candidate)
+        except:
+            pass
+
+    # Strategy 2: Extract all balanced JSON objects and merge
+    objects = []
+    i = 0
+    while i < len(text):
         if text[i] == '{':
-            depth += 1
-        elif text[i] == '}':
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(text[start:i+1])
-                except:
-                    return None
+            depth = 0
+            j = i
+            while j < len(text):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[i:j+1]
+                        try:
+                            obj = json.loads(candidate)
+                            objects.append(obj)
+                            i = j
+                            break
+                        except:
+                            pass
+                j += 1
+        i += 1
+
+    if objects:
+        # Merge all objects, but prioritize the one with 'result' key
+        # If there's an object with 'result', use that as the base, then merge others into it.
+        base = None
+        others = []
+        for obj in objects:
+            if 'result' in obj:
+                if base is None:
+                    base = obj.copy()
+                else:
+                    # Merge result dicts
+                    if isinstance(base.get('result'), dict) and isinstance(obj.get('result'), dict):
+                        base['result'].update(obj['result'])
+                    else:
+                        base.update(obj)
+            else:
+                others.append(obj)
+        if base is None:
+            # No object with 'result', merge all into one
+            base = {}
+            for obj in objects:
+                base.update(obj)
+        else:
+            # Merge others into base
+            for other in others:
+                base.update(other)
+        return base
+
+    # Strategy 3: Fallback to outermost extraction (already tried in strategy 1)
     return None
 
 def replace_tags_recursive(obj):
@@ -366,9 +420,9 @@ def query_bot_sync(command_text, group_type):
         logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
 
         bot_replies = []
-        for attempt in range(10):
+        for attempt in range(12):  # 12 attempts = 24 seconds
             await asyncio.sleep(2)
-            async for msg in client.iter_messages(group.id, limit=80):
+            async for msg in client.iter_messages(group.id, limit=100):
                 if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
                     bot_replies.append(msg)
                     logger.info(f"📩 Found reply (attempt {attempt+1})")
@@ -392,13 +446,11 @@ def query_bot_sync(command_text, group_type):
 
         combined_text = "".join([msg.raw_text for msg in unique_replies])
 
-        # Extract the outermost JSON
         data = extract_json_from_text(combined_text)
         if data is None:
             await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
             return {"error": "No valid JSON found"}
 
-        # Replace all tag and developer keys
         data = replace_tags_recursive(data)
         data["developer"] = DEVELOPER_TAG
         data["tag"] = DEVELOPER_TAG
@@ -411,7 +463,7 @@ def query_bot_sync(command_text, group_type):
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
-        return future.result(timeout=35)
+        return future.result(timeout=40)
     except asyncio.TimeoutError:
         return {"error": "Request timed out"}
     except Exception as e:
@@ -483,7 +535,7 @@ def statu_endpoint():
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     return jsonify(result)
 
-# ================= ADMIN PANEL =================
+# ================= ADMIN PANEL (unchanged) =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
