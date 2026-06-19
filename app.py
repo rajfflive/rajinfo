@@ -311,78 +311,23 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= NEW JSON EXTRACTION (FIXED) =================
-def extract_all_json_objects(text):
-    """Extract all balanced JSON objects from text, return list of (obj, length)."""
-    objects = []
-    i = 0
-    while i < len(text):
-        if text[i] == '{':
-            depth = 0
-            j = i
-            while j < len(text):
-                if text[j] == '{':
-                    depth += 1
-                elif text[j] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[i:j+1]
-                        try:
-                            obj = json.loads(candidate)
-                            objects.append((obj, len(candidate)))
-                            i = j
-                            break
-                        except:
-                            pass
-                j += 1
-        i += 1
-    return objects
-
-def choose_best_json(objects):
-    """Choose the best JSON object: prefer one with 'result' key, else largest."""
-    if not objects:
-        return None
-    # Prefer object with 'result' key
-    for obj, _ in objects:
-        if 'result' in obj:
-            return obj
-    # Otherwise return the largest (by character count)
-    largest = max(objects, key=lambda x: x[1])
-    return largest[0]
-
-def deep_merge(base, override):
-    """Deep merge with array extension."""
-    if isinstance(base, dict) and isinstance(override, dict):
-        for k, v in override.items():
-            if k in base:
-                if isinstance(base[k], list) and isinstance(v, list):
-                    base[k].extend(v)
-                elif isinstance(base[k], dict) and isinstance(v, dict):
-                    deep_merge(base[k], v)
-                else:
-                    base[k] = v
-            else:
-                base[k] = v
-        return base
-    elif isinstance(base, list) and isinstance(override, list):
-        return base + override
-    else:
-        return override
-
+# ================= SIMPLE JSON EXTRACTION (OUTERMOST) =================
 def extract_json_from_text(text):
-    """Extract the best JSON object from combined bot replies."""
-    all_objects = extract_all_json_objects(text)
-    if not all_objects:
+    """Extract the outermost balanced JSON object."""
+    start = text.find('{')
+    if start == -1:
         return None
-    # Pick the best one
-    best = choose_best_json(all_objects)
-    if best:
-        # Merge all other objects into best (in case parts are split)
-        merged = best
-        for obj, _ in all_objects:
-            if obj is not best:
-                merged = deep_merge(merged, obj)
-        return merged
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i+1])
+                except:
+                    return None
     return None
 
 def replace_tags_recursive(obj):
@@ -447,13 +392,13 @@ def query_bot_sync(command_text, group_type):
 
         combined_text = "".join([msg.raw_text for msg in unique_replies])
 
-        # NEW: extract best JSON (the full one with 'result')
+        # Extract the outermost JSON
         data = extract_json_from_text(combined_text)
         if data is None:
             await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
             return {"error": "No valid JSON found"}
 
-        # Replace tags recursively
+        # Replace all tag and developer keys
         data = replace_tags_recursive(data)
         data["developer"] = DEVELOPER_TAG
         data["tag"] = DEVELOPER_TAG
