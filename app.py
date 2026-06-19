@@ -51,7 +51,7 @@ def clear_cache():
     global response_cache
     response_cache.clear()
 
-# ================= DATABASE (unchanged) =================
+# ================= DATABASE =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -311,62 +311,18 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= BULLETPROOF JSON EXTRACTION =================
+# ================= SIMPLE JSON EXTRACTION =================
 def extract_json_from_text(text):
-    """Extract the largest valid JSON object (likely the full response)."""
-    candidates = []
-    i = 0
-    while i < len(text):
-        if text[i] == '{':
-            depth = 0
-            j = i
-            while j < len(text):
-                if text[j] == '{':
-                    depth += 1
-                elif text[j] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[i:j+1]
-                        try:
-                            obj = json.loads(candidate)
-                            candidates.append((candidate, obj))
-                            i = j
-                            break
-                        except:
-                            pass
-                j += 1
-        i += 1
-
-    if not candidates:
+    """Extract the outermost JSON object from first '{' to last '}'."""
+    start = text.find('{')
+    end = text.rfind('}')
+    if start == -1 or end == -1 or end <= start:
         return None
-
-    # Pick the candidate with 'result' (if any) else the longest
-    best_candidate = None
-    best_obj = None
-    for cand, obj in candidates:
-        if 'result' in obj:
-            best_candidate = cand
-            best_obj = obj
-            break
-    if best_obj is None:
-        # pick longest
-        best_candidate, best_obj = max(candidates, key=lambda x: len(x[0]))
-
-    # Merge all other candidates into best (to catch any stray parts)
-    for cand, obj in candidates:
-        if obj is not best_obj:
-            if isinstance(obj, dict) and isinstance(best_obj, dict):
-                for k, v in obj.items():
-                    if k in best_obj:
-                        if isinstance(best_obj[k], list) and isinstance(v, list):
-                            best_obj[k].extend(v)
-                        elif isinstance(best_obj[k], dict) and isinstance(v, dict):
-                            best_obj[k].update(v)
-                        else:
-                            best_obj[k] = v
-                    else:
-                        best_obj[k] = v
-    return best_obj
+    candidate = text[start:end+1]
+    try:
+        return json.loads(candidate)
+    except:
+        return None
 
 def replace_tags_recursive(obj):
     if isinstance(obj, dict):
@@ -519,7 +475,7 @@ def statu_endpoint():
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     return jsonify(result)
 
-# ================= ADMIN PANEL (unchanged) =================
+# ================= ADMIN PANEL =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
