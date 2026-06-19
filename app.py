@@ -51,7 +51,7 @@ def clear_cache():
     global response_cache
     response_cache.clear()
 
-# ================= DATABASE (unchanged) =================
+# ================= DATABASE =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -311,38 +311,79 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= JSON EXTRACTION (ROBUST) =================
-def extract_outer_json(text):
-    """Find the outermost balanced JSON object."""
-    start = text.find('{')
-    if start == -1:
-        return None
-    depth = 0
-    for i in range(start, len(text)):
+# ================= NEW JSON EXTRACTION (FIXED) =================
+def extract_all_json_objects(text):
+    """Extract all balanced JSON objects from text, return list of (obj, length)."""
+    objects = []
+    i = 0
+    while i < len(text):
         if text[i] == '{':
-            depth += 1
-        elif text[i] == '}':
-            depth -= 1
-            if depth == 0:
-                return text[start:i+1]
-    return None
+            depth = 0
+            j = i
+            while j < len(text):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[i:j+1]
+                        try:
+                            obj = json.loads(candidate)
+                            objects.append((obj, len(candidate)))
+                            i = j
+                            break
+                        except:
+                            pass
+                j += 1
+        i += 1
+    return objects
 
-def deep_merge_arrays(base, override):
-    """Deep merge, but if both have lists, extend the list."""
+def choose_best_json(objects):
+    """Choose the best JSON object: prefer one with 'result' key, else largest."""
+    if not objects:
+        return None
+    # Prefer object with 'result' key
+    for obj, _ in objects:
+        if 'result' in obj:
+            return obj
+    # Otherwise return the largest (by character count)
+    largest = max(objects, key=lambda x: x[1])
+    return largest[0]
+
+def deep_merge(base, override):
+    """Deep merge with array extension."""
     if isinstance(base, dict) and isinstance(override, dict):
-        for key, value in override.items():
-            if key in base:
-                if isinstance(base[key], list) and isinstance(value, list):
-                    base[key].extend(value)
-                elif isinstance(base[key], dict) and isinstance(value, dict):
-                    deep_merge_arrays(base[key], value)
+        for k, v in override.items():
+            if k in base:
+                if isinstance(base[k], list) and isinstance(v, list):
+                    base[k].extend(v)
+                elif isinstance(base[k], dict) and isinstance(v, dict):
+                    deep_merge(base[k], v)
                 else:
-                    base[key] = value
+                    base[k] = v
             else:
-                base[key] = value
+                base[k] = v
         return base
+    elif isinstance(base, list) and isinstance(override, list):
+        return base + override
     else:
         return override
+
+def extract_json_from_text(text):
+    """Extract the best JSON object from combined bot replies."""
+    all_objects = extract_all_json_objects(text)
+    if not all_objects:
+        return None
+    # Pick the best one
+    best = choose_best_json(all_objects)
+    if best:
+        # Merge all other objects into best (in case parts are split)
+        merged = best
+        for obj, _ in all_objects:
+            if obj is not best:
+                merged = deep_merge(merged, obj)
+        return merged
+    return None
 
 def replace_tags_recursive(obj):
     if isinstance(obj, dict):
@@ -406,46 +447,11 @@ def query_bot_sync(command_text, group_type):
 
         combined_text = "".join([msg.raw_text for msg in unique_replies])
 
-        # Try to extract the outer JSON
-        json_str = extract_outer_json(combined_text)
-        if json_str is None:
-            # fallback: extract multiple objects and merge with array extending
-            objects = []
-            i = 0
-            while i < len(combined_text):
-                if combined_text[i] == '{':
-                    depth = 0
-                    j = i
-                    while j < len(combined_text):
-                        if combined_text[j] == '{':
-                            depth += 1
-                        elif combined_text[j] == '}':
-                            depth -= 1
-                            if depth == 0:
-                                candidate = combined_text[i:j+1]
-                                try:
-                                    obj = json.loads(candidate)
-                                    objects.append(obj)
-                                except:
-                                    pass
-                                i = j
-                                break
-                        j += 1
-                i += 1
-            if objects:
-                merged = {}
-                for obj in objects:
-                    merged = deep_merge_arrays(merged, obj)
-                data = merged
-            else:
-                await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
-                return {"error": "No valid JSON found"}
-        else:
-            try:
-                data = json.loads(json_str)
-            except:
-                await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
-                return {"error": "JSON parsing failed"}
+        # NEW: extract best JSON (the full one with 'result')
+        data = extract_json_from_text(combined_text)
+        if data is None:
+            await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
+            return {"error": "No valid JSON found"}
 
         # Replace tags recursively
         data = replace_tags_recursive(data)
@@ -532,7 +538,7 @@ def statu_endpoint():
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     return jsonify(result)
 
-# ================= ADMIN PANEL (unchanged) =================
+# ================= ADMIN PANEL =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
