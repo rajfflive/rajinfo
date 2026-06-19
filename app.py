@@ -11,7 +11,6 @@ from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import Message
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,11 +24,11 @@ CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
 # ================= GROUP NAMES =================
 GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
 GROUP_OTHER_NAME = "TGTOINFO"
-BOT_USERNAME = "usersXinfo0bot"  # the bot that replies
+BOT_USERNAME = "usersXinfo0bot"
 
 GROUP_MAIN = None
 GROUP_OTHER = None
-BOT_ID = None  # will be set after fetching bot entity
+BOT_ID = None
 SPECIAL_COMMANDS = ["upiinfo", "fam", "family", "pan", "tg", "leak"]
 
 # ================= CACHE =================
@@ -94,7 +93,7 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- DB HELPERS (unchanged) ----------
+# ---------- DB HELPERS ----------
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -227,9 +226,7 @@ app.secret_key = secrets.token_hex(16)
 accounts = []
 account_clients = {}
 telegram_loops = {}
-pending = {}
 account_index = 0
-bot_id = None  # will store bot's user ID
 
 def get_next_account():
     global account_index
@@ -239,7 +236,7 @@ def get_next_account():
     return accounts[account_index]
 
 async def start_account(account_data):
-    global GROUP_MAIN, GROUP_OTHER, bot_id
+    global GROUP_MAIN, GROUP_OTHER, BOT_ID
     acc_id = account_data['id']
     api_id = account_data['api_id']
     api_hash = account_data['api_hash']
@@ -270,13 +267,13 @@ async def start_account(account_data):
                 logger.info(f"✅ Other group via dialog: {GROUP_OTHER.title}")
                 break
 
-    # Fetch bot entity to get its ID
+    # Fetch bot ID
     try:
         bot_entity = await client.get_entity(BOT_USERNAME)
-        bot_id = bot_entity.id
-        logger.info(f"✅ Bot ID: {bot_id}")
+        BOT_ID = bot_entity.id
+        logger.info(f"✅ Bot ID: {BOT_ID}")
     except:
-        logger.error(f"❌ Could not fetch bot {BOT_USERNAME}")
+        logger.warning(f"⚠️ Could not fetch bot {BOT_USERNAME}")
 
     # Send startup message
     if GROUP_OTHER:
@@ -286,43 +283,13 @@ async def start_account(account_data):
         except Exception as e:
             logger.error(f"Startup message failed: {e}")
 
+    # Event handler – still useful for other purposes
     @client.on(events.NewMessage)
     async def handler(event):
-        # Only process if it's a message from the bot and is a reply to a pending command
-        if bot_id and event.sender_id == bot_id and event.reply_to_msg_id:
-            orig_id = event.reply_to_msg_id
-            if orig_id in pending:
-                logger.info(f"📩 Bot reply to command {orig_id}")
-                text = event.raw_text
-                # Extract JSON
-                start = text.find('{')
-                end = text.rfind('}') + 1
-                if start != -1 and end > start:
-                    try:
-                        data = json.loads(text[start:end])
-                        pending[orig_id]["collected"].append(data)
-                        logger.info(f"📦 Collected JSON part {len(pending[orig_id]['collected'])}")
-                    except Exception as e:
-                        logger.error(f"JSON parse error: {e}")
-                # Reset timer
-                if pending[orig_id]["timer"]:
-                    pending[orig_id]["timer"].cancel()
-                async def finish():
-                    await asyncio.sleep(4)  # longer wait for second part
-                    if orig_id in pending:
-                        merged = {}
-                        for part in pending[orig_id]["collected"]:
-                            merged.update(part)
-                        if not merged:
-                            merged = {"error": "No JSON data"}
-                        merged["developer"] = DEVELOPER_TAG
-                        pending[orig_id]["future"].set_result(merged)
-                        # Delete command and replies
-                        pending[orig_id]["reply_ids"].append(event.id)
-                        await client.delete_messages(event.chat_id, [orig_id] + pending[orig_id]["reply_ids"])
-                        logger.info(f"🗑️ Deleted command {orig_id} and replies")
-                        del pending[orig_id]
-                pending[orig_id]["timer"] = asyncio.create_task(finish())
+        # Just log messages for debugging; we'll use polling for actual response
+        if event.sender_id == BOT_ID:
+            logger.info(f"📩 Bot message seen: {event.raw_text[:50]}...")
+        # We won't use this for response gathering, only logging
 
     await client.run_until_disconnected()
 
@@ -354,7 +321,7 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= QUERY FUNCTION =================
+# ================= QUERY FUNCTION (POLLING) =================
 def query_bot_sync(command_text, group_type):
     account = get_next_account()
     if not account:
@@ -371,26 +338,62 @@ def query_bot_sync(command_text, group_type):
         return {"error": f"Group '{group_type}' not found"}
 
     async def do_query():
+        # Send command
         sent = await client.send_message(group, command_text)
         msg_id = sent.id
         logger.info(f"📤 Sent {command_text} (msg_id: {msg_id})")
-        fut = asyncio.get_event_loop().create_future()
-        pending[msg_id] = {"future": fut, "collected": [], "timer": None, "reply_ids": []}
-        try:
-            result = await asyncio.wait_for(fut, timeout=20)  # longer timeout
-            return result
-        except asyncio.TimeoutError:
-            if msg_id in pending:
-                await client.delete_messages(group, [msg_id])
-                del pending[msg_id]
-            logger.warning(f"⏱️ Timeout for {command_text}")
-            return {"error": "Bot did not respond"}
-        finally:
-            update_account_last_used(acc_id)
 
+        # Wait for bot to reply (allow up to 10 seconds)
+        await asyncio.sleep(6)
+
+        # Fetch recent messages (limit 30) from the group
+        bot_replies = []
+        async for msg in client.iter_messages(group, limit=30):
+            # Check if message is from bot and is a reply to our command
+            if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
+                bot_replies.append(msg)
+            # Also check if message is from bot and contains the target number (as fallback)
+            elif msg.sender_id == BOT_ID and command_text.split()[1] in msg.raw_text:
+                bot_replies.append(msg)
+
+        if not bot_replies:
+            # No replies found
+            await client.delete_messages(group, [msg_id])
+            return {"error": "Bot did not respond"}
+
+        # Sort by date (oldest first) to combine parts correctly
+        bot_replies.sort(key=lambda m: m.date)
+        combined_text = "\n".join([msg.raw_text for msg in bot_replies])
+
+        # Extract JSON from combined text
+        start = combined_text.find('{')
+        end = combined_text.rfind('}') + 1
+        if start == -1 or end <= start:
+            await client.delete_messages(group, [msg_id] + [m.id for m in bot_replies])
+            return {"error": "No valid JSON found"}
+
+        json_str = combined_text[start:end]
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}")
+            await client.delete_messages(group, [msg_id] + [m.id for m in bot_replies])
+            return {"error": f"Invalid JSON: {str(e)}"}
+
+        # Add developer tag
+        data["developer"] = DEVELOPER_TAG
+
+        # Delete command and all bot replies
+        to_delete = [msg_id] + [m.id for m in bot_replies]
+        await client.delete_messages(group, to_delete)
+        logger.info(f"🗑️ Deleted {len(to_delete)} messages")
+
+        return data
+
+    # Run the async function on the correct loop
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
-        return future.result(timeout=35)
+        return future.result(timeout=25)
     except asyncio.TimeoutError:
         return {"error": "Request timed out"}
     except Exception as e:
@@ -616,7 +619,7 @@ def admin_dashboard():
                                  cache_size=len(response_cache),
                                  group_main_name=GROUP_MAIN_NAME,
                                  group_other_name=GROUP_OTHER_NAME,
-                                 bot_id=bot_id)
+                                 bot_id=BOT_ID)
 
 @app.route('/admin/clear_cache')
 @admin_login_required
