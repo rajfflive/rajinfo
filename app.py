@@ -11,7 +11,6 @@ from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import Channel, Chat
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -247,7 +246,6 @@ async def start_account(account_data):
     logger.info(f"✅ Account {account_data['name']} (ID: {acc_id}) connected")
     account_clients[acc_id] = client
 
-    # Fetch groups
     for name, var_name in [(GROUP_MAIN_NAME, 'GROUP_MAIN'), (GROUP_OTHER_NAME, 'GROUP_OTHER')]:
         try:
             entity = await client.get_entity(name)
@@ -266,7 +264,6 @@ async def start_account(account_data):
                     logger.info(f"✅ {var_name} via dialog: {dialog.name}")
                     break
 
-    # Fetch bot
     try:
         bot_entity = await client.get_entity(BOT_USERNAME)
         BOT_ID = bot_entity.id
@@ -315,6 +312,33 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
+# ================= JSON EXTRACTOR =================
+def extract_json_objects(text):
+    """Extract all balanced JSON objects from text and return as list."""
+    objects = []
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            depth = 0
+            j = i
+            while j < len(text):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[i:j+1]
+                        try:
+                            obj = json.loads(candidate)
+                            objects.append(obj)
+                            i = j
+                            break
+                        except:
+                            pass
+                j += 1
+        i += 1
+    return objects
+
 # ================= QUERY FUNCTION (RETRY LOGIC) =================
 def query_bot_sync(command_text, group_type):
     account = get_next_account()
@@ -332,28 +356,20 @@ def query_bot_sync(command_text, group_type):
         return {"error": f"Group '{group_type}' not found"}
 
     async def do_query():
-        # Send command using the entity's ID (works for both chats and channels)
         sent = await client.send_message(group.id, command_text)
         msg_id = sent.id
         logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
 
-        # Wait and retry a few times to collect bot replies
         bot_replies = []
-        for attempt in range(5):  # 5 attempts, 2 seconds each = 10 seconds total
+        for attempt in range(5):
             await asyncio.sleep(2)
-            # Fetch recent messages
             async for msg in client.iter_messages(group.id, limit=50):
-                # Check if message is from bot and is a reply to our command
                 if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
                     bot_replies.append(msg)
-                    logger.info(f"📩 Found reply (attempt {attempt+1}): {msg.raw_text[:50]}...")
-                # Fallback: if reply_to is missing but message contains the target number
+                    logger.info(f"📩 Found reply (attempt {attempt+1})")
                 elif msg.sender_id == BOT_ID and command_text.split()[1] in msg.raw_text:
                     bot_replies.append(msg)
-                    logger.info(f"📩 Found fallback reply (attempt {attempt+1}): {msg.raw_text[:50]}...")
-            # Remove duplicates (same message could appear in multiple attempts)
-            # Actually we only append new ones, but we can deduplicate later
-            # We'll just break if we have at least one reply
+                    logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
             if bot_replies:
                 break
 
@@ -361,41 +377,38 @@ def query_bot_sync(command_text, group_type):
             await client.delete_messages(group.id, [msg_id])
             return {"error": "Bot did not respond"}
 
-        # Remove duplicate messages (by id)
+        # Deduplicate and sort
         seen = set()
         unique_replies = []
         for msg in bot_replies:
             if msg.id not in seen:
                 seen.add(msg.id)
                 unique_replies.append(msg)
-        unique_replies.sort(key=lambda m: m.date)  # oldest first
+        unique_replies.sort(key=lambda m: m.date)
 
-        # Combine raw text of all replies WITHOUT adding extra separators
         combined_text = "".join([msg.raw_text for msg in unique_replies])
 
-        # Extract JSON from combined text
-        start = combined_text.find('{')
-        end = combined_text.rfind('}') + 1
-        if start == -1 or end <= start:
-            await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
-            return {"error": "No valid JSON found"}
+        # Extract all JSON objects from the combined text
+        objects = extract_json_objects(combined_text)
 
-        json_str = combined_text[start:end]
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {e}\nJSON string: {json_str[:500]}")
+        if not objects:
             await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
-            return {"error": f"Invalid JSON: {str(e)}"}
+            return {"error": "No valid JSON objects found"}
 
-        data["developer"] = DEVELOPER_TAG
+        # Merge all objects into one (last key wins)
+        merged = {}
+        for obj in objects:
+            merged.update(obj)
+
+        # Add developer tag
+        merged["developer"] = DEVELOPER_TAG
 
         # Delete command and all bot replies
         to_delete = [msg_id] + [m.id for m in unique_replies]
         await client.delete_messages(group.id, to_delete)
         logger.info(f"🗑️ Deleted {len(to_delete)} messages")
 
-        return data
+        return merged
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
