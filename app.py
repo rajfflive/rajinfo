@@ -6,12 +6,13 @@ import secrets
 import threading
 import time
 import logging
-import re
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
+from telethon.tl.types import KeyboardButtonCallback
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,32 +26,13 @@ CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
 GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
 GROUP_OTHER_NAME = "TGTOINFO"
 BOT_USERNAME = "usersXinfo0bot"
+DADDY_BOT_USERNAME = "Daddyinfosbot"
 
 GROUP_MAIN = None
 GROUP_OTHER = None
 BOT_ID = None
+DADDY_BOT_ID = None
 SPECIAL_COMMANDS = ["upiinfo", "fam", "family", "pan", "tg", "leak"]
-
-# ================= CACHE =================
-response_cache = {}
-
-def get_cached(cmd, value):
-    key = f"{cmd}:{value}"
-    if key in response_cache:
-        data, timestamp = response_cache[key]
-        if time.time() - timestamp < CACHE_EXPIRE_SECONDS:
-            return data
-        else:
-            del response_cache[key]
-    return None
-
-def set_cache(cmd, value, data):
-    key = f"{cmd}:{value}"
-    response_cache[key] = (data, time.time())
-
-def clear_cache():
-    global response_cache
-    response_cache.clear()
 
 # ================= DATABASE =================
 DB_FILE = "felix_api.db"
@@ -89,10 +71,17 @@ def init_db():
                   date TEXT,
                   count INTEGER,
                   PRIMARY KEY (key, date))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS bot_settings
+                 (group_id INTEGER,
+                  bot_name TEXT,
+                  command TEXT,
+                  enabled INTEGER DEFAULT 1,
+                  PRIMARY KEY (group_id, bot_name, command))''')
     conn.commit()
     conn.close()
 init_db()
 
+# ---------- DB HELPERS ----------
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -217,6 +206,23 @@ def delete_key(key):
     conn.commit()
     conn.close()
 
+def get_bot_setting(group_id, bot_name, command):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT enabled FROM bot_settings WHERE group_id=? AND bot_name=? AND command=?",
+              (group_id, bot_name, command))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row is not None else 1
+
+def set_bot_setting(group_id, bot_name, command, enabled):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO bot_settings (group_id, bot_name, command, enabled) VALUES (?,?,?,?)",
+              (group_id, bot_name, command, 1 if enabled else 0))
+    conn.commit()
+    conn.close()
+
 # ================= FLASK =================
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
@@ -235,7 +241,7 @@ def get_next_account():
     return accounts[account_index]
 
 async def start_account(account_data):
-    global GROUP_MAIN, GROUP_OTHER, BOT_ID
+    global GROUP_MAIN, GROUP_OTHER, BOT_ID, DADDY_BOT_ID
     acc_id = account_data['id']
     api_id = account_data['api_id']
     api_hash = account_data['api_hash']
@@ -270,6 +276,13 @@ async def start_account(account_data):
     except:
         logger.warning(f"⚠️ Could not fetch bot {BOT_USERNAME}")
 
+    try:
+        daddy_entity = await client.get_entity(DADDY_BOT_USERNAME)
+        DADDY_BOT_ID = daddy_entity.id
+        logger.info(f"✅ Daddy Bot ID: {DADDY_BOT_ID}")
+    except:
+        logger.warning(f"⚠️ Could not fetch Daddy bot {DADDY_BOT_USERNAME}")
+
     if GROUP_OTHER:
         try:
             await client.send_message(GROUP_OTHER, "Started ✅")
@@ -279,7 +292,7 @@ async def start_account(account_data):
 
     @client.on(events.NewMessage)
     async def handler(event):
-        if event.sender_id == BOT_ID:
+        if event.sender_id == BOT_ID or event.sender_id == DADDY_BOT_ID:
             logger.info(f"📩 Bot message seen: {event.raw_text[:50]}...")
 
     await client.run_until_disconnected()
@@ -311,102 +324,113 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= FIXED: ROBUST RESPONSE COLLECTION =================
+# ================= JSON EXTRACTION & CLEANING =================
 def extract_json_from_text(text):
-    """Try multiple strategies to extract valid JSON - improved version."""
-    if not text:
-        return None
-
-    # Strategy 1: find first '{' and last '}', extract and parse
     start = text.find('{')
     end = text.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        # First, try to clean up common formatting issues
-        candidate = text[start:end+1]
-        # Fix single quotes to double quotes
-        candidate = re.sub(r"(?<!\\)'(.*?)(?<!\\)'", r'"\1"', candidate)
-        # Fix trailing commas before closing braces
-        candidate = re.sub(r',\s*}', '}', candidate)
-        candidate = re.sub(r',\s*]', ']', candidate)
-        try:
-            return json.loads(candidate)
-        except:
-            pass
-
-    # Strategy 2: extract all balanced JSON objects, merge intelligently
-    objects = []
-    i = 0
-    while i < len(text):
-        if text[i] == '{':
-            depth = 0
-            j = i
-            while j < len(text):
-                if text[j] == '{':
-                    depth += 1
-                elif text[j] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[i:j+1]
-                        # Pre-clean candidate
-                        candidate_clean = re.sub(r",\s*}", "}", candidate)
-                        candidate_clean = re.sub(r",\s*]", "]", candidate_clean)
-                        try:
-                            obj = json.loads(candidate_clean)
-                            objects.append((candidate_clean, obj))
-                            i = j
-                            break
-                        except:
-                            pass
-                j += 1
-        i += 1
-
-    if not objects:
+    if start == -1 or end == -1 or end <= start:
+        return None
+    candidate = text[start:end+1]
+    try:
+        return json.loads(candidate)
+    except:
         return None
 
-    # Merge all objects - prefer the one with most keys
-    merged = {}
-    for cand, obj in objects:
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if k not in merged:
-                    merged[k] = v
-                elif isinstance(merged[k], list) and isinstance(v, list):
-                    merged[k].extend(v)
-                elif isinstance(merged[k], dict) and isinstance(v, dict):
-                    merged[k].update(v)
+def clean_response(obj):
+    if isinstance(obj, dict):
+        remove_keys = ['developer_credits', 'telegram_channel', 'telegram_id']
+        new_obj = {}
+        for k, v in obj.items():
+            if k in remove_keys:
+                continue
+            cleaned_val = clean_response(v)
+            if k.lower() in ('tag', 'developer'):
+                new_obj[k] = DEVELOPER_TAG
+            else:
+                new_obj[k] = cleaned_val
+        return new_obj
+    elif isinstance(obj, list):
+        return [clean_response(item) for item in obj]
+    else:
+        return obj
 
-    if merged:
-        return merged
-
-    # Fallback: return the largest object
-    best = max(objects, key=lambda x: len(x[1]) if isinstance(x[1], dict) else 0)
-    return best[1]
-
-def clean_raw_text(raw_text):
-    """Clean the raw text before JSON extraction."""
-    if not raw_text:
-        return raw_text
-    # Remove markdown formatting that breaks JSON
-    cleaned = re.sub(r'\*+', '', raw_text)
-    cleaned = re.sub(r'_+', '', cleaned)
-    # Remove HTML tags
-    cleaned = re.sub(r'<[^>]+>', '', cleaned)
-    # Fix unquoted keys (common in Telegram bot JSON)
-    cleaned = re.sub(r'(?<!")(\b[a-zA-Z_][a-zA-Z0-9_]*\b)(?=\s*:)', r'"\1"', cleaned)
+def finalize_response(data):
+    if data is None:
+        return None
+    cleaned = clean_response(data)
+    cleaned['developer'] = DEVELOPER_TAG
+    cleaned['tag'] = DEVELOPER_TAG
     return cleaned
 
-def replace_tags_in_text(text):
-    """Replace tags at the text level before JSON extraction."""
-    if not text:
-        return text
-    # Replace common tag patterns
-    text = re.sub(r'@\w+', DEVELOPER_TAG, text)
-    # Replace common developer/original references
-    text = re.sub(r'(?i)(original|dev(eloper)?|channel|credit)\s*[:@]\s*\S+', r'\1: ' + DEVELOPER_TAG, text)
-    return text
+# ================= DADDY BOT QUERY =================
+async def query_daddy_bot_async(value):
+    """Send /info <value> to Daddy bot, click 'Telegram' button, fetch response."""
+    account = get_next_account()
+    if not account:
+        return {"error": "No active Telegram accounts"}
+    acc_id = account['id']
+    client = account_clients.get(acc_id)
+    if client is None:
+        return {"error": "Account not ready"}
 
-# ================= FIXED: QUERY FUNCTION =================
-def query_bot_sync(command_text, group_type):
+    # Send command
+    sent = await client.send_message(DADDY_BOT_USERNAME, f"/info {value}")
+    logger.info(f"📤 Sent /info {value} to Daddy bot")
+
+    # Wait for reply with inline keyboard
+    await asyncio.sleep(3)
+    replies = []
+    async for msg in client.iter_messages(DADDY_BOT_USERNAME, limit=10):
+        if msg.reply_to_msg_id == sent.id:
+            replies.append(msg)
+    if not replies:
+        return {"error": "No reply from Daddy bot"}
+
+    # Find message with inline keyboard containing "Telegram" button
+    target_msg = None
+    button_data = None
+    for msg in replies:
+        if msg.reply_markup:
+            for row in msg.reply_markup.rows:
+                for btn in row.buttons:
+                    if isinstance(btn, KeyboardButtonCallback) and "Telegram" in btn.text:
+                        target_msg = msg
+                        button_data = btn.data
+                        break
+                if button_data:
+                    break
+        if button_data:
+            break
+
+    if not button_data:
+        return {"error": "No 'Telegram' button found"}
+
+    # Click the button
+    logger.info("🖱️ Clicking 'Telegram' button...")
+    await client(GetBotCallbackAnswerRequest(
+        peer=DADDY_BOT_USERNAME,
+        msg_id=target_msg.id,
+        data=button_data
+    ))
+
+    # Wait for the final response (info)
+    await asyncio.sleep(4)
+    final_msgs = []
+    async for msg in client.iter_messages(DADDY_BOT_USERNAME, limit=10):
+        if msg.date > target_msg.date and msg.sender_id == DADDY_BOT_ID:
+            final_msgs.append(msg)
+    if not final_msgs:
+        return {"error": "No info received after button click"}
+
+    combined = "".join([m.raw_text for m in final_msgs])
+    data = extract_json_from_text(combined)
+    if data is None:
+        # Fallback: return raw text
+        return {"raw": combined}
+    return data
+
+# ================= QUERY FUNCTION =================
+def query_bot_sync(command_text, group_type, bot_type="main"):
     account = get_next_account()
     if not account:
         return {"error": "No active Telegram accounts"}
@@ -422,155 +446,57 @@ def query_bot_sync(command_text, group_type):
         return {"error": f"Group '{group_type}' not found"}
 
     async def do_query():
-        # Send the command
-        sent = await client.send_message(group.id, command_text)
+        if bot_type == "daddy":
+            return await query_daddy_bot_async(command_text.split()[1])
+
+        sent = await client.send_message(group, command_text)
         msg_id = sent.id
         logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
 
-        # Collect ALL bot replies that are replies to our message
         bot_replies = []
-        max_wait = 20  # 20 iterations * 1.5s = 30 seconds total
-        last_bot_count = 0
-        stable_iterations = 0
-
-        for attempt in range(max_wait):
-            await asyncio.sleep(1.5)
-            
-            # Get messages after our sent message
-            async for msg in client.iter_messages(
-                group.id, 
-                limit=100,
-                offset_id=sent.id,
-                reverse=True
-            ):
-                # Only messages from the bot that are replies to our message
-                if msg.sender_id == BOT_ID:
-                    # Check if it's a direct reply to our message
-                    is_direct_reply = (hasattr(msg, 'reply_to') and 
-                                       msg.reply_to and 
-                                       msg.reply_to.reply_to_msg_id == msg_id)
-                    
-                    # OR if it contains our command value in some way
-                    contains_cmd = command_text.split()[1] in msg.raw_text if len(command_text.split()) > 1 else False
-                    
-                    if is_direct_reply or contains_cmd:
-                        if msg.id not in [m.id for m in bot_replies]:
-                            bot_replies.append(msg)
-                            logger.info(f"📩 Collected reply message #{len(bot_replies)} (ID: {msg.id}, attempt {attempt+1})")
-
-            # Check if we stopped getting new messages (bot finished)
-            current_count = len(bot_replies)
-            if current_count > 0 and current_count == last_bot_count:
-                stable_iterations += 1
-                if stable_iterations >= 3:  # 3 consecutive checks with no new messages = done
-                    logger.info(f"✅ Bot finished responding after {current_count} messages")
-                    break
-            elif current_count > last_bot_count:
-                stable_iterations = 0
-            
-            last_bot_count = current_count
+        for attempt in range(15):
+            await asyncio.sleep(2)
+            async for msg in client.iter_messages(group, limit=150):
+                if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
+                    bot_replies.append(msg)
+                    logger.info(f"📩 Found reply (attempt {attempt+1})")
+                elif msg.sender_id == BOT_ID and command_text.split()[1] in msg.raw_text:
+                    bot_replies.append(msg)
+                    logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
+            if bot_replies:
+                break
 
         if not bot_replies:
-            # Extended fallback: search ALL recent bot messages
-            logger.warning("⚠️ No direct replies found, searching broader...")
-            await asyncio.sleep(3)
-            async for msg in client.iter_messages(group.id, limit=200):
-                if msg.sender_id == BOT_ID:
-                    # Check if message is recent (within last 60 seconds)
-                    if msg.date and (datetime.now(timezone.utc) - msg.date).total_seconds() < 60:
-                        # Check if any part of command text matches
-                        cmd_parts = command_text.split()
-                        for part in cmd_parts:
-                            if len(part) > 2 and part in msg.raw_text:
-                                if msg.id not in [m.id for m in bot_replies]:
-                                    bot_replies.append(msg)
-                                    logger.info(f"📩 Fallback collected reply (ID: {msg.id})")
-                                break
-
-        if not bot_replies:
-            await client.delete_messages(group.id, [msg_id])
+            await client.delete_messages(group, [msg_id])
             return {"error": "Bot did not respond"}
 
-        # Sort by date and get all raw text
-        bot_replies.sort(key=lambda m: m.date)
-        
-        all_responses = []
-        combined_text = ""
-        
+        seen = set()
+        unique_replies = []
         for msg in bot_replies:
-            raw = msg.raw_text
-            all_responses.append(raw)
-            combined_text += raw + "\n"
+            if msg.id not in seen:
+                seen.add(msg.id)
+                unique_replies.append(msg)
+        unique_replies.sort(key=lambda m: m.date)
 
-        logger.info(f"📄 Combined {len(bot_replies)} messages, total length: {len(combined_text)}")
-
-        # FIRST: Replace tags at text level
-        combined_text = replace_tags_in_text(combined_text)
-        
-        # SECOND: Clean the text for better JSON extraction
-        cleaned_text = clean_raw_text(combined_text)
-
-        # THIRD: Try JSON extraction
-        data = extract_json_from_text(cleaned_text)
-        
+        combined_text = "".join([m.raw_text for m in unique_replies])
+        data = extract_json_from_text(combined_text)
         if data is None:
-            # Final attempt: try extracting from each individual message
-            logger.warning("⚠️ Could not extract JSON from combined text, trying individual messages...")
-            for raw_response in all_responses:
-                cleaned_single = clean_raw_text(replace_tags_in_text(raw_response))
-                data = extract_json_from_text(cleaned_single)
-                if data:
-                    break
+            await client.delete_messages(group, [msg_id] + [m.id for m in unique_replies])
+            return {"error": "No valid JSON found"}
 
-        if data is None:
-            await client.delete_messages(group.id, [msg_id] + [m.id for m in bot_replies])
-            return {"error": "No valid JSON found in bot response"}
-
-        # FOURTH: Recursively replace any remaining tags in the JSON
-        data = replace_tags_recursive(data)
-        data["developer"] = DEVELOPER_TAG
-        data["tag"] = DEVELOPER_TAG
-
-        # Clean up: delete our command and bot replies
-        to_delete = [msg_id] + [m.id for m in bot_replies]
-        try:
-            await client.delete_messages(group.id, to_delete)
-            logger.info(f"🗑️ Deleted {len(to_delete)} messages")
-        except Exception as e:
-            logger.warning(f"⚠️ Could not delete some messages: {e}")
-
-        return data
+        cleaned = finalize_response(data)
+        to_delete = [msg_id] + [m.id for m in unique_replies]
+        await client.delete_messages(group, to_delete)
+        logger.info(f"🗑️ Deleted {len(to_delete)} messages")
+        return cleaned
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
-        return future.result(timeout=60)
+        return future.result(timeout=50)
     except asyncio.TimeoutError:
-        return {"error": "Request timed out (60s)"}
+        return {"error": "Request timed out"}
     except Exception as e:
         return {"error": str(e)}
-
-def replace_tags_recursive(obj):
-    """Recursively replace tags in JSON objects."""
-    if isinstance(obj, dict):
-        new_obj = {}
-        for k, v in obj.items():
-            # Replace tag values at any key level
-            if isinstance(v, str) and ('@' in v):
-                # Check if this looks like a tag/username value
-                if re.match(r'^@?\w+$', v.strip()):
-                    new_obj[k] = DEVELOPER_TAG
-                else:
-                    # Replace any @username within the string
-                    new_obj[k] = re.sub(r'@\w+', DEVELOPER_TAG, v)
-            else:
-                new_obj[k] = replace_tags_recursive(v)
-        return new_obj
-    elif isinstance(obj, list):
-        return [replace_tags_recursive(item) for item in obj]
-    else:
-        if isinstance(obj, str) and '@' in obj:
-            return re.sub(r'@\w+', DEVELOPER_TAG, obj)
-        return obj
 
 # ================= AUTH =================
 def admin_login_required(f):
@@ -603,21 +529,26 @@ def require_api_key(f):
     return decorated
 
 # ================= API ENDPOINTS =================
-ALL_COMMANDS = ["num", "veh", "vnum", "upiinfo", "fam", "insta", "ip", "email", "tg", "ifsc", "adhar", "imei", "pak", "family", "gst", "bomber", "pan", "leak"]
+ALL_COMMANDS = ["num", "veh", "vnum", "upiinfo", "fam", "insta", "ip", "email", "tg", "ifsc", "adhar", "imei", "pak", "family", "gst", "bomber", "pan", "leak", "daddy"]
 
 for cmd in ALL_COMMANDS:
     def make_endpoint(cmd):
         @require_api_key
         def endpoint(value):
+            # Check if command is enabled for the group
+            # For daddy, we don't have a group, but we can check a global setting? We'll skip for now.
             cached = get_cached(cmd, value)
             if cached is not None:
-                cached = replace_tags_recursive(cached)
-                cached["developer"] = DEVELOPER_TAG
-                cached["tag"] = DEVELOPER_TAG
+                cached = finalize_response(cached)
                 log_usage(request.api_key, cmd, value, json.dumps(cached), True, None)
                 return jsonify(cached)
-            group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
-            result = query_bot_sync(f"/{cmd} {value}", group_type)
+
+            if cmd == "daddy":
+                result = query_bot_sync(f"/info {value}", None, bot_type="daddy")
+            else:
+                group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
+                result = query_bot_sync(f"/{cmd} {value}", group_type)
+            result = finalize_response(result)
             if "error" not in result:
                 set_cache(cmd, value, result)
             log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
@@ -629,6 +560,7 @@ for cmd in ALL_COMMANDS:
 @require_api_key
 def statu_endpoint():
     result = query_bot_sync("/statu", "other")
+    result = finalize_response(result)
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     return jsonify(result)
 
@@ -664,6 +596,7 @@ ADMIN_HTML = """
         <div class="tab" onclick="showTab('accounts')">Accounts</div>
         <div class="tab" onclick="showTab('logs')">Usage Logs</div>
         <div class="tab" onclick="showTab('status')">Status</div>
+        <div class="tab" onclick="showTab('settings')">Bot Settings</div>
         <div style="margin-left:auto;"><a href="/admin/logout" style="color:red;">Logout</a></div>
     </div>
     <div id="keys" class="panel">
@@ -747,6 +680,34 @@ ADMIN_HTML = """
         <p><strong>Main Group (Special):</strong> {{ group_main_name }}</p>
         <p><strong>Other Group:</strong> {{ group_other_name }}</p>
         <p><strong>Bot ID:</strong> {{ bot_id or 'Not fetched' }}</p>
+        <p><strong>Daddy Bot ID:</strong> {{ daddy_bot_id or 'Not fetched' }}</p>
+    </div>
+    <div id="settings" class="panel" style="display:none;">
+        <h2>Bot Settings (Toggle ON/OFF)</h2>
+        <form method="POST" action="/admin/toggle_bot">
+            <input type="text" name="group_name" placeholder="Group Name (e.g., TGTOINFO)" required>
+            <input type="text" name="bot_name" placeholder="Bot username (e.g., usersXinfo0bot)" required>
+            <input type="text" name="command" placeholder="Command (e.g., num, daddy)" required>
+            <select name="enabled">
+                <option value="1">ON</option>
+                <option value="0">OFF</option>
+            </select>
+            <button type="submit" class="success">Set</button>
+        </form>
+        <hr>
+        <h3>Current Settings</h3>
+        <table>
+            <tr><th>Group</th><th>Bot</th><th>Command</th><th>Status</th></tr>
+            {% for setting in settings %}
+            <tr>
+                <td>{{ setting.group }}</td>
+                <td>{{ setting.bot }}</td>
+                <td>{{ setting.command }}</td>
+                <td>{{ '✅' if setting.enabled else '❌' }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        <p><i>Default: All enabled. Use the form to override.</i></p>
     </div>
 </div>
 <script>
@@ -780,6 +741,13 @@ def admin_dashboard():
     keys = get_all_keys()
     accounts = get_all_accounts()
     logs = get_usage_logs(100)
+    # fetch bot settings
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT group_id, bot_name, command, enabled FROM bot_settings")
+    settings_raw = c.fetchall()
+    conn.close()
+    settings = [{"group": r[0], "bot": r[1], "command": r[2], "enabled": bool(r[3])} for r in settings_raw]
     return render_template_string(ADMIN_HTML,
                                  keys=keys,
                                  accounts=accounts,
@@ -789,7 +757,9 @@ def admin_dashboard():
                                  cache_size=len(response_cache),
                                  group_main_name=GROUP_MAIN_NAME,
                                  group_other_name=GROUP_OTHER_NAME,
-                                 bot_id=BOT_ID)
+                                 bot_id=BOT_ID,
+                                 daddy_bot_id=DADDY_BOT_ID,
+                                 settings=settings)
 
 @app.route('/admin/clear_cache')
 @admin_login_required
@@ -864,6 +834,24 @@ def admin_delete_account(acc_id):
     delete_account(acc_id)
     global accounts
     accounts = [a for a in accounts if a['id'] != acc_id]
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/toggle_bot', methods=['POST'])
+@admin_login_required
+def admin_toggle_bot():
+    group_name = request.form.get('group_name')
+    bot_name = request.form.get('bot_name')
+    command = request.form.get('command')
+    enabled = int(request.form.get('enabled', 1))
+    # resolve group id
+    group_id = None
+    for g in [GROUP_MAIN, GROUP_OTHER]:
+        if g and g.title == group_name:
+            group_id = g.id
+            break
+    if group_id is None:
+        return "Group not found", 400
+    set_bot_setting(group_id, bot_name, command, enabled)
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/logout')
