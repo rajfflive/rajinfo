@@ -81,7 +81,7 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- DB HELPERS (same as before) ----------
+# ---------- DB HELPERS ----------
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -385,7 +385,6 @@ def finalize_response(data):
 
 # ================= DADDY BOT QUERY =================
 async def query_daddy_bot_async(value):
-    """Send /info <value> to Daddy bot, click 'Telegram' button, fetch response."""
     account = get_next_account()
     if not account:
         return {"error": "No active Telegram accounts"}
@@ -394,11 +393,9 @@ async def query_daddy_bot_async(value):
     if client is None:
         return {"error": "Account not ready"}
 
-    # Send command
     sent = await client.send_message(DADDY_BOT_USERNAME, f"/info {value}")
     logger.info(f"📤 Sent /info {value} to Daddy bot")
 
-    # Wait for reply with inline keyboard
     await asyncio.sleep(3)
     replies = []
     async for msg in client.iter_messages(DADDY_BOT_USERNAME, limit=10):
@@ -407,7 +404,6 @@ async def query_daddy_bot_async(value):
     if not replies:
         return {"error": "No reply from Daddy bot"}
 
-    # Find message with inline keyboard containing "Telegram" button
     target_msg = None
     button_data = None
     for msg in replies:
@@ -426,7 +422,6 @@ async def query_daddy_bot_async(value):
     if not button_data:
         return {"error": "No 'Telegram' button found"}
 
-    # Click the button
     logger.info("🖱️ Clicking 'Telegram' button...")
     await client(GetBotCallbackAnswerRequest(
         peer=DADDY_BOT_USERNAME,
@@ -434,7 +429,6 @@ async def query_daddy_bot_async(value):
         data=button_data
     ))
 
-    # Wait for the final response (info)
     await asyncio.sleep(4)
     final_msgs = []
     async for msg in client.iter_messages(DADDY_BOT_USERNAME, limit=10):
@@ -446,7 +440,6 @@ async def query_daddy_bot_async(value):
     combined = "".join([m.raw_text for m in final_msgs])
     data = extract_json_from_text(combined)
     if data is None:
-        # Fallback: return raw text
         return {"raw": combined}
     return data
 
@@ -584,11 +577,163 @@ def statu_endpoint():
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     return jsonify(result)
 
-# ================= ADMIN PANEL (unchanged) =================
-# (The admin HTML is huge; I'll include it in the final code but for brevity, I'll assume it's the same as before with the "Bot Settings" tab.
-# Please copy the full admin HTML from the previous response.)
-
-# For brevity, I'll add the admin panel minimal. But you can use the full one.
+# ================= ADMIN PANEL =================
+ADMIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Felix API - Admin</title>
+    <style>
+        body { font-family: Arial; margin: 0; padding: 20px; background: #f0f2f5; }
+        .container { max-width: 1200px; margin: auto; }
+        h1 { color: #1a73e8; }
+        .tabs { display: flex; gap: 10px; margin: 20px 0; flex-wrap: wrap; }
+        .tab { padding: 10px 20px; background: white; border-radius: 5px; cursor: pointer; border: 1px solid #ddd; }
+        .tab.active { background: #1a73e8; color: white; border-color: #1a73e8; }
+        .panel { background: white; padding: 20px; border-radius: 10px; margin-top: 10px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background: #f2f2f2; }
+        input, textarea { padding: 8px; width: 100%; margin: 5px 0; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 10px 20px; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .danger { background: #f44336; }
+        .success { background: #4CAF50; }
+        .clear { background: #ff9800; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Felix API - Admin</h1>
+    <div class="tabs">
+        <div class="tab active" onclick="showTab('keys')">API Keys</div>
+        <div class="tab" onclick="showTab('accounts')">Accounts</div>
+        <div class="tab" onclick="showTab('logs')">Usage Logs</div>
+        <div class="tab" onclick="showTab('status')">Status</div>
+        <div class="tab" onclick="showTab('settings')">Bot Settings</div>
+        <div style="margin-left:auto;"><a href="/admin/logout" style="color:red;">Logout</a></div>
+    </div>
+    <div id="keys" class="panel">
+        <h2>Generate API Key</h2>
+        <form method="POST" action="/admin/create_key">
+            <input type="text" name="name" placeholder="Key Name" required>
+            <input type="number" name="expiry_days" placeholder="Expiry Days (0=forever)" value="30">
+            <input type="number" name="daily_limit" placeholder="Daily Limit (0=unlimited)" value="100">
+            <button type="submit" class="success">Generate</button>
+        </form>
+        <hr>
+        <h2>Active API Keys</h2>
+        <table>
+            <tr><th>Key</th><th>Name</th><th>Expiry</th><th>Daily Limit</th><th>Status</th><th>Actions</th></tr>
+            {% for k in keys %}
+            <tr>
+                <td><code>{{ k.key }}</code></td>
+                <td>{{ k.name }}</td>
+                <td>{{ k.expiry_days if k.expiry_days > 0 else 'Forever' }}</td>
+                <td>{{ k.daily_limit if k.daily_limit > 0 else 'Unlimited' }}</td>
+                <td>{{ '✅' if k.active else '❌' }}</td>
+                <td>
+                    <a href="/admin/revoke/{{ k.key }}" class="danger">Revoke</a>
+                    <a href="/admin/delete/{{ k.key }}" class="danger" onclick="return confirm('Delete?')">Delete</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        <p><strong>Permanent Key:</strong> <code>{{ permanent_key }}</code></p>
+        <p><a href="/admin/clear_cache" class="clear" style="color:white;padding:5px 10px;border-radius:4px;text-decoration:none;">Clear Cache</a> ({{ cache_size }} entries)</p>
+    </div>
+    <div id="accounts" class="panel" style="display:none;">
+        <h2>Add Account</h2>
+        <form method="POST" action="/admin/add_account">
+            <input type="text" name="name" placeholder="Account Name" required>
+            <input type="number" name="api_id" placeholder="API ID" required>
+            <input type="text" name="api_hash" placeholder="API Hash" required>
+            <textarea name="session_string" placeholder="Session String" rows="3" required></textarea>
+            <button type="submit" class="success">Add Account</button>
+        </form>
+        <hr>
+        <h2>Active Accounts</h2>
+        <table>
+            <tr><th>ID</th><th>Name</th><th>API ID</th><th>Status</th><th>Actions</th></tr>
+            {% for acc in accounts %}
+            <tr>
+                <td>{{ acc.id }}</td>
+                <td>{{ acc.name }}</td>
+                <td>{{ acc.api_id }}</td>
+                <td>{{ '✅' if acc.active else '❌' }}</td>
+                <td>
+                    <a href="/admin/toggle_account/{{ acc.id }}">{{ 'Disable' if acc.active else 'Enable' }}</a>
+                    <a href="/admin/delete_account/{{ acc.id }}" onclick="return confirm('Delete?')">Delete</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+    <div id="logs" class="panel" style="display:none;">
+        <h2>Usage Logs (last 100)</h2>
+        <table>
+            <tr><th>Time</th><th>Key</th><th>Command</th><th>Value</th><th>Response (truncated)</th><th>Success</th></tr>
+            {% for log in logs %}
+            <tr>
+                <td>{{ log.timestamp[:19] }}</td>
+                <td>{{ log.key[:8] }}...</td>
+                <td>{{ log.command }}</td>
+                <td>{{ log.value }}</td>
+                <td>{{ log.response[:80] }}{% if log.response|length > 80 %}...{% endif %}</td>
+                <td>{{ '✅' if log.success else '❌' }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+    <div id="status" class="panel" style="display:none;">
+        <h2>Status</h2>
+        <p><strong>Active Accounts:</strong> {{ accounts|length }}</p>
+        <p><strong>API Keys:</strong> {{ keys|length }}</p>
+        <p><strong>Cache Entries:</strong> {{ cache_size }}</p>
+        <p><strong>Developer:</strong> {{ developer }}</p>
+        <p><strong>Main Group (Special):</strong> {{ group_main_name }}</p>
+        <p><strong>Other Group:</strong> {{ group_other_name }}</p>
+        <p><strong>Bot ID:</strong> {{ bot_id or 'Not fetched' }}</p>
+        <p><strong>Daddy Bot ID:</strong> {{ daddy_bot_id or 'Not fetched' }}</p>
+    </div>
+    <div id="settings" class="panel" style="display:none;">
+        <h2>Bot Settings (Toggle ON/OFF)</h2>
+        <form method="POST" action="/admin/toggle_bot">
+            <input type="text" name="group_name" placeholder="Group Name (e.g., TGTOINFO)" required>
+            <input type="text" name="bot_name" placeholder="Bot username (e.g., usersXinfo0bot)" required>
+            <input type="text" name="command" placeholder="Command (e.g., num, daddy)" required>
+            <select name="enabled">
+                <option value="1">ON</option>
+                <option value="0">OFF</option>
+            </select>
+            <button type="submit" class="success">Set</button>
+        </form>
+        <hr>
+        <h3>Current Settings</h3>
+        <table>
+            <tr><th>Group</th><th>Bot</th><th>Command</th><th>Status</th></tr>
+            {% for setting in settings %}
+            <tr>
+                <td>{{ setting.group }}</td>
+                <td>{{ setting.bot }}</td>
+                <td>{{ setting.command }}</td>
+                <td>{{ '✅' if setting.enabled else '❌' }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        <p><i>Default: All enabled. Use the form to override.</i></p>
+    </div>
+</div>
+<script>
+function showTab(tab) {
+    document.querySelectorAll('.panel').forEach(p => p.style.display = 'none');
+    document.getElementById(tab).style.display = 'block';
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelector(`.tab[onclick*="${tab}"]`).classList.add('active');
+}
+</script>
+</body>
+</html>
+"""
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
@@ -609,16 +754,131 @@ def admin_dashboard():
     keys = get_all_keys()
     accounts = get_all_accounts()
     logs = get_usage_logs(100)
-    return render_template_string(ADMIN_HTML, keys=keys, accounts=accounts, logs=logs,
-                                 permanent_key=PERMANENT_KEY, developer=DEVELOPER_TAG,
+    # Fetch settings
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT group_id, bot_name, command, enabled FROM bot_settings")
+    settings_raw = c.fetchall()
+    conn.close()
+    settings = [{"group": r[0], "bot": r[1], "command": r[2], "enabled": bool(r[3])} for r in settings_raw]
+    return render_template_string(ADMIN_HTML,
+                                 keys=keys,
+                                 accounts=accounts,
+                                 logs=logs,
+                                 permanent_key=PERMANENT_KEY,
+                                 developer=DEVELOPER_TAG,
                                  cache_size=len(response_cache),
-                                 group_main_name=GROUP_MAIN_NAME, group_other_name=GROUP_OTHER_NAME,
-                                 bot_id=BOT_ID, daddy_bot_id=DADDY_BOT_ID,
-                                 settings=[])
+                                 group_main_name=GROUP_MAIN_NAME,
+                                 group_other_name=GROUP_OTHER_NAME,
+                                 bot_id=BOT_ID,
+                                 daddy_bot_id=DADDY_BOT_ID,
+                                 settings=settings)
 
-# I'll include the full admin HTML from the earlier response (the one with Bot Settings).
-# For brevity, I'm not copy-pasting the huge HTML here, but you can use the previous version.
-# I'll provide the full code in the final answer.
+@app.route('/admin/clear_cache')
+@admin_login_required
+def admin_clear_cache():
+    clear_cache()
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/create_key', methods=['POST'])
+@admin_login_required
+def admin_create_key():
+    name = request.form.get('name')
+    expiry_days = int(request.form.get('expiry_days', 30))
+    daily_limit = int(request.form.get('daily_limit', 100))
+    if not name:
+        return "Name required", 400
+    new_key = secrets.token_hex(16)
+    add_api_key(new_key, name, name, expiry_days, daily_limit)
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/revoke/<key>')
+@admin_login_required
+def admin_revoke_key(key):
+    revoke_key(key)
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/delete/<key>')
+@admin_login_required
+def admin_delete_key(key):
+    delete_key(key)
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/add_account', methods=['POST'])
+@admin_login_required
+def admin_add_account():
+    name = request.form.get('name')
+    api_id = int(request.form.get('api_id'))
+    api_hash = request.form.get('api_hash')
+    session_string = request.form.get('session_string')
+    if not all([name, api_id, api_hash, session_string]):
+        return "All fields required", 400
+    add_account(name, api_id, api_hash, session_string)
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id FROM accounts WHERE name=? AND api_id=? AND active=1 ORDER BY id DESC LIMIT 1", (name, api_id))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        new_acc = {"id": row[0], "name": name, "api_id": api_id, "api_hash": api_hash, "session_string": session_string}
+        accounts.append(new_acc)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        telegram_loops[new_acc["id"]] = loop
+        thread = threading.Thread(target=lambda: loop.run_until_complete(start_account(new_acc)), daemon=True)
+        thread.start()
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/toggle_account/<int:acc_id>')
+@admin_login_required
+def admin_toggle_account(acc_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT active FROM accounts WHERE id=?", (acc_id,))
+    row = c.fetchone()
+    if row:
+        toggle_account(acc_id, 0 if row[0] else 1)
+    conn.close()
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/delete_account/<int:acc_id>')
+@admin_login_required
+def admin_delete_account(acc_id):
+    delete_account(acc_id)
+    global accounts
+    accounts = [a for a in accounts if a['id'] != acc_id]
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/toggle_bot', methods=['POST'])
+@admin_login_required
+def admin_toggle_bot():
+    group_name = request.form.get('group_name')
+    bot_name = request.form.get('bot_name')
+    command = request.form.get('command')
+    enabled = int(request.form.get('enabled', 1))
+    # resolve group id
+    group_id = None
+    for g in [GROUP_MAIN, GROUP_OTHER]:
+        if g and g.title == group_name:
+            group_id = g.id
+            break
+    if group_id is None:
+        return "Group not found", 400
+    set_bot_setting(group_id, bot_name, command, enabled)
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/logout')
+def admin_logout():
+    session.pop('admin_logged_in', None)
+    return redirect(url_for('admin_login'))
+
+@app.route('/')
+def home():
+    return '<h2>Felix API</h2><p>Use /command?api_key=YOUR_KEY</p><p><a href="/admin/login">Admin</a></p>'
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok", "accounts": len(accounts)})
 
 if __name__ == "__main__":
     init_accounts()
