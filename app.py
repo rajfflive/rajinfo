@@ -86,7 +86,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS global_settings
                  (key TEXT PRIMARY KEY,
                   value TEXT)''')
-    # Insert default daddy bot if not exists
     c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('daddy_bot_username', ?)", (DEFAULT_DADDY_BOT,))
     c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('daddy_enabled', '1')")
     conn.commit()
@@ -336,7 +335,6 @@ async def start_account(account_data):
                     logger.info(f"✅ {var_name} via dialog: {dialog.name}")
                     break
 
-    # Fetch bot entity (usersXinfo0bot) for main commands
     try:
         bot_entity = await client.get_entity(BOT_USERNAME)
         BOT_ID = bot_entity.id
@@ -344,7 +342,6 @@ async def start_account(account_data):
     except:
         logger.warning(f"⚠️ Could not fetch bot {BOT_USERNAME}")
 
-    # Fetch Daddy bot entity (will be used only when needed)
     daddy_bot_name = get_global_setting('daddy_bot_username') or DEFAULT_DADDY_BOT
     try:
         daddy_entity = await client.get_entity(daddy_bot_name)
@@ -432,11 +429,13 @@ def finalize_response(data):
     cleaned['tag'] = DEVELOPER_TAG
     return cleaned
 
-# ================= DADDY BOT QUERY (plain message, no /info) =================
+# ================= DADDY BOT QUERY =================
 async def query_daddy_bot_async(client, value):
-    """Send plain value to Daddy bot, click 'Telegram' button, fetch response."""
+    """Send plain value (username without @ or numeric ID) to Daddy bot."""
+    # Strip @ if present at the beginning
+    if value.startswith('@'):
+        value = value[1:]
     daddy_bot_name = get_global_setting('daddy_bot_username') or DEFAULT_DADDY_BOT
-    # Send plain message (just the username/id)
     sent = await client.send_message(daddy_bot_name, value)
     logger.info(f"📤 Sent plain '{value}' to {daddy_bot_name}")
 
@@ -503,7 +502,6 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
     async def do_query():
         try:
             if bot_type == "daddy":
-                # Check if daddy bot is enabled
                 if get_global_setting('daddy_enabled') != '1':
                     return {"error": "Daddy bot is disabled by admin"}
                 return await query_daddy_bot_async(client, command_text)
@@ -616,11 +614,9 @@ for cmd in ALL_COMMANDS:
                 return jsonify(cached)
 
             if cmd == "daddy":
-                # Send plain value (no /info)
                 result = query_bot_sync(value, None, bot_type="daddy")
             else:
                 group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
-                # For main group commands, we might want to check if the command is enabled in settings? We'll do later.
                 result = query_bot_sync(f"/{cmd} {value}", group_type)
             result = finalize_response(result)
             if "error" not in result:
