@@ -26,7 +26,7 @@ CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
 GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
 GROUP_OTHER_NAME = "TGTOINFO"
 BOT_USERNAME = "usersXinfo0bot"
-DADDY_BOT_USERNAME = "Daddyinfosbot"
+DEFAULT_DADDY_BOT = "Daddyinfosbot"
 
 GROUP_MAIN = None
 GROUP_OTHER = None
@@ -77,18 +77,38 @@ def init_db():
                   command TEXT,
                   enabled INTEGER DEFAULT 1,
                   PRIMARY KEY (group_id, bot_name, command))''')
-    # Stats table
     c.execute('''CREATE TABLE IF NOT EXISTS stats
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   command TEXT,
                   value TEXT,
                   success INTEGER,
                   timestamp TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS global_settings
+                 (key TEXT PRIMARY KEY,
+                  value TEXT)''')
+    # Insert default daddy bot if not exists
+    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('daddy_bot_username', ?)", (DEFAULT_DADDY_BOT,))
+    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('daddy_enabled', '1')")
     conn.commit()
     conn.close()
 init_db()
 
 # ---------- DB HELPERS ----------
+def get_global_setting(key):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT value FROM global_settings WHERE key=?", (key,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def set_global_setting(key, value):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO global_settings (key, value) VALUES (?,?)", (key, value))
+    conn.commit()
+    conn.close()
+
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -230,7 +250,6 @@ def set_bot_setting(group_id, bot_name, command, enabled):
     conn.commit()
     conn.close()
 
-# Stats helpers
 def add_stats(command, value, success):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -317,6 +336,7 @@ async def start_account(account_data):
                     logger.info(f"✅ {var_name} via dialog: {dialog.name}")
                     break
 
+    # Fetch bot entity (usersXinfo0bot) for main commands
     try:
         bot_entity = await client.get_entity(BOT_USERNAME)
         BOT_ID = bot_entity.id
@@ -324,12 +344,14 @@ async def start_account(account_data):
     except:
         logger.warning(f"⚠️ Could not fetch bot {BOT_USERNAME}")
 
+    # Fetch Daddy bot entity (will be used only when needed)
+    daddy_bot_name = get_global_setting('daddy_bot_username') or DEFAULT_DADDY_BOT
     try:
-        daddy_entity = await client.get_entity(DADDY_BOT_USERNAME)
+        daddy_entity = await client.get_entity(daddy_bot_name)
         DADDY_BOT_ID = daddy_entity.id
         logger.info(f"✅ Daddy Bot ID: {DADDY_BOT_ID}")
     except:
-        logger.warning(f"⚠️ Could not fetch Daddy bot {DADDY_BOT_USERNAME}")
+        logger.warning(f"⚠️ Could not fetch Daddy bot {daddy_bot_name}")
 
     if GROUP_OTHER:
         try:
@@ -410,15 +432,17 @@ def finalize_response(data):
     cleaned['tag'] = DEVELOPER_TAG
     return cleaned
 
-# ================= DADDY BOT QUERY =================
+# ================= DADDY BOT QUERY (plain message, no /info) =================
 async def query_daddy_bot_async(client, value):
-    """Send /info <value> to Daddy bot using the given client."""
-    sent = await client.send_message(DADDY_BOT_USERNAME, f"/info {value}")
-    logger.info(f"📤 Sent /info {value} to Daddy bot")
+    """Send plain value to Daddy bot, click 'Telegram' button, fetch response."""
+    daddy_bot_name = get_global_setting('daddy_bot_username') or DEFAULT_DADDY_BOT
+    # Send plain message (just the username/id)
+    sent = await client.send_message(daddy_bot_name, value)
+    logger.info(f"📤 Sent plain '{value}' to {daddy_bot_name}")
 
     await asyncio.sleep(3)
     replies = []
-    async for msg in client.iter_messages(DADDY_BOT_USERNAME, limit=10):
+    async for msg in client.iter_messages(daddy_bot_name, limit=10):
         if msg.reply_to_msg_id == sent.id:
             replies.append(msg)
     if not replies:
@@ -444,14 +468,14 @@ async def query_daddy_bot_async(client, value):
 
     logger.info("🖱️ Clicking 'Telegram' button...")
     await client(GetBotCallbackAnswerRequest(
-        peer=DADDY_BOT_USERNAME,
+        peer=daddy_bot_name,
         msg_id=target_msg.id,
         data=button_data
     ))
 
     await asyncio.sleep(4)
     final_msgs = []
-    async for msg in client.iter_messages(DADDY_BOT_USERNAME, limit=10):
+    async for msg in client.iter_messages(daddy_bot_name, limit=10):
         if msg.date > target_msg.date and msg.sender_id == DADDY_BOT_ID:
             final_msgs.append(msg)
     if not final_msgs:
@@ -479,7 +503,10 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
     async def do_query():
         try:
             if bot_type == "daddy":
-                return await query_daddy_bot_async(client, command_text.split()[1])
+                # Check if daddy bot is enabled
+                if get_global_setting('daddy_enabled') != '1':
+                    return {"error": "Daddy bot is disabled by admin"}
+                return await query_daddy_bot_async(client, command_text)
 
             group = GROUP_MAIN if group_type == "main" else GROUP_OTHER
             if group is None:
@@ -532,9 +559,10 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
         result = future.result(timeout=50)
-        # Log stats
         success = 'error' not in result
-        add_stats(command_text.split()[0] if command_text else 'unknown', command_text.split()[1] if len(command_text.split()) > 1 else '', success)
+        command_for_stats = command_text.split()[0] if command_text and ' ' in command_text else command_text
+        value_for_stats = command_text.split()[1] if command_text and len(command_text.split()) > 1 else ''
+        add_stats(command_for_stats, value_for_stats, success)
         return result
     except asyncio.TimeoutError:
         add_stats('timeout', '', False)
@@ -588,15 +616,16 @@ for cmd in ALL_COMMANDS:
                 return jsonify(cached)
 
             if cmd == "daddy":
-                result = query_bot_sync(f"/info {value}", None, bot_type="daddy")
+                # Send plain value (no /info)
+                result = query_bot_sync(value, None, bot_type="daddy")
             else:
                 group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
+                # For main group commands, we might want to check if the command is enabled in settings? We'll do later.
                 result = query_bot_sync(f"/{cmd} {value}", group_type)
             result = finalize_response(result)
             if "error" not in result:
                 set_cache(cmd, value, result)
             log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
-            # Stats are already logged inside query_bot_sync, but we also log here for cache hits
             return jsonify(result)
         return endpoint
     app.add_url_rule(f'/{cmd}/<value>', f'api_{cmd}', make_endpoint(cmd), methods=['GET'])
@@ -627,7 +656,7 @@ ADMIN_HTML = """
         table { width: 100%; border-collapse: collapse; }
         th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
         th { background: #f2f2f2; }
-        input, textarea { padding: 8px; width: 100%; margin: 5px 0; border: 1px solid #ddd; border-radius: 4px; }
+        input, textarea, select { padding: 8px; width: 100%; margin: 5px 0; border: 1px solid #ddd; border-radius: 4px; }
         button { padding: 10px 20px; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; }
         .danger { background: #f44336; }
         .success { background: #4CAF50; }
@@ -734,7 +763,20 @@ ADMIN_HTML = """
         <p><strong>❌ Failed:</strong> {{ stats.fail }}</p>
     </div>
     <div id="settings" class="panel" style="display:none;">
-        <h2>Bot Settings (Toggle ON/OFF)</h2>
+        <h2>Global Bot Settings</h2>
+        <form method="POST" action="/admin/update_global_settings">
+            <h3>Daddy Bot</h3>
+            <label>Bot Username (without @):</label>
+            <input type="text" name="daddy_bot_username" value="{{ daddy_bot_username }}" placeholder="e.g., Daddyinfosbot">
+            <label>Enable Daddy Bot:</label>
+            <select name="daddy_enabled">
+                <option value="1" {% if daddy_enabled == '1' %}selected{% endif %}>ON</option>
+                <option value="0" {% if daddy_enabled == '0' %}selected{% endif %}>OFF</option>
+            </select>
+            <button type="submit" class="success">Update</button>
+        </form>
+        <hr>
+        <h3>Toggle Group Commands</h3>
         <form method="POST" action="/admin/toggle_bot">
             <input type="text" name="group_name" placeholder="Group Name (e.g., TGTOINFO)" required>
             <input type="text" name="bot_name" placeholder="Bot username (e.g., usersXinfo0bot)" required>
@@ -802,6 +844,9 @@ def admin_dashboard():
     # Stats
     total, success, fail = get_stats()
     stats = {"total": total, "success": success, "fail": fail}
+    # Global settings
+    daddy_bot_username = get_global_setting('daddy_bot_username') or DEFAULT_DADDY_BOT
+    daddy_enabled = get_global_setting('daddy_enabled') or '1'
     return render_template_string(ADMIN_HTML,
                                  keys=keys,
                                  accounts=accounts,
@@ -814,7 +859,9 @@ def admin_dashboard():
                                  bot_id=BOT_ID,
                                  daddy_bot_id=DADDY_BOT_ID,
                                  settings=settings,
-                                 stats=stats)
+                                 stats=stats,
+                                 daddy_bot_username=daddy_bot_username,
+                                 daddy_enabled=daddy_enabled)
 
 @app.route('/admin/clear_cache')
 @admin_login_required
@@ -907,6 +954,16 @@ def admin_toggle_bot():
     if group_id is None:
         return "Group not found", 400
     set_bot_setting(group_id, bot_name, command, enabled)
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/update_global_settings', methods=['POST'])
+@admin_login_required
+def admin_update_global_settings():
+    daddy_bot_username = request.form.get('daddy_bot_username', '').strip()
+    daddy_enabled = request.form.get('daddy_enabled', '1')
+    if daddy_bot_username:
+        set_global_setting('daddy_bot_username', daddy_bot_username)
+    set_global_setting('daddy_enabled', daddy_enabled)
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/logout')
