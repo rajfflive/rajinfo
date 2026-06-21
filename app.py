@@ -48,7 +48,7 @@ def init_db():
                   session_string TEXT,
                   active INTEGER DEFAULT 1,
                   last_used TIMESTAMP,
-                  daddy_bot TEXT)''')  # <-- added daddy_bot column
+                  daddy_bot TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS api_keys
                  (key TEXT PRIMARY KEY,
                   name TEXT,
@@ -143,6 +143,13 @@ def toggle_account(account_id, active):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("UPDATE accounts SET active = ? WHERE id = ?", (1 if active else 0, account_id))
+    conn.commit()
+    conn.close()
+
+def update_account_daddy_bot(account_id, daddy_bot):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE accounts SET daddy_bot = ? WHERE id = ?", (daddy_bot, account_id))
     conn.commit()
     conn.close()
 
@@ -707,13 +714,13 @@ ADMIN_HTML = """
             <input type="number" name="api_id" placeholder="API ID" required>
             <input type="text" name="api_hash" placeholder="API Hash" required>
             <textarea name="session_string" placeholder="Session String" rows="3" required></textarea>
-            <input type="text" name="daddy_bot" placeholder="Daddy Bot Username (optional)" value="">
+            <input type="text" name="daddy_bot" placeholder="Daddy Bot Username (optional)">
             <button type="submit" class="success">Add Account</button>
         </form>
         <hr>
         <h2>Active Accounts</h2>
         <table>
-            <tr><th>ID</th><th>Name</th><th>API ID</th><th>Status</th><th>Daddy Bot</th><th>Actions</th></tr>
+            <tr><th>ID</th><th>Name</th><th>API ID</th><th>Status</th><th>Daddy Bot</th><th>Update Daddy Bot</th><th>Actions</th></tr>
             {% for acc in accounts %}
             <tr>
                 <td>{{ acc.id }}</td>
@@ -721,6 +728,12 @@ ADMIN_HTML = """
                 <td>{{ acc.api_id }}</td>
                 <td>{{ '✅' if acc.active else '❌' }}</td>
                 <td>{{ acc.daddy_bot or 'Default' }}</td>
+                <td>
+                    <form method="POST" action="/admin/update_account/{{ acc.id }}" style="display:flex; gap:5px;">
+                        <input type="text" name="daddy_bot" value="{{ acc.daddy_bot or '' }}" placeholder="Daddy bot username" style="flex:1;">
+                        <button type="submit" class="success" style="padding:5px 10px;">Update</button>
+                    </form>
+                </td>
                 <td>
                     <a href="/admin/toggle_account/{{ acc.id }}">{{ 'Disable' if acc.active else 'Enable' }}</a>
                     <a href="/admin/delete_account/{{ acc.id }}" onclick="return confirm('Delete?')">Delete</a>
@@ -916,6 +929,18 @@ def admin_add_account():
         telegram_loops[new_acc["id"]] = loop
         thread = threading.Thread(target=lambda: loop.run_until_complete(start_account(new_acc)), daemon=True)
         thread.start()
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/update_account/<int:acc_id>', methods=['POST'])
+@admin_login_required
+def admin_update_account(acc_id):
+    daddy_bot = request.form.get('daddy_bot', '').strip() or None
+    update_account_daddy_bot(acc_id, daddy_bot)
+    # Update in-memory accounts list
+    for acc in accounts:
+        if acc['id'] == acc_id:
+            acc['daddy_bot'] = daddy_bot
+            break
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/toggle_account/<int:acc_id>')
