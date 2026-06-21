@@ -67,12 +67,6 @@ def init_db():
                   date TEXT,
                   count INTEGER,
                   PRIMARY KEY (key, date))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS bot_settings
-                 (group_id INTEGER,
-                  bot_name TEXT,
-                  command TEXT,
-                  enabled INTEGER DEFAULT 1,
-                  PRIMARY KEY (group_id, bot_name, command))''')
     c.execute('''CREATE TABLE IF NOT EXISTS stats
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   command TEXT,
@@ -208,23 +202,6 @@ def delete_key(key):
     conn.commit()
     conn.close()
 
-def get_bot_setting(group_id, bot_name, command):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT enabled FROM bot_settings WHERE group_id=? AND bot_name=? AND command=?",
-              (group_id, bot_name, command))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row is not None else 1
-
-def set_bot_setting(group_id, bot_name, command, enabled):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO bot_settings (group_id, bot_name, command, enabled) VALUES (?,?,?,?)",
-              (group_id, bot_name, command, 1 if enabled else 0))
-    conn.commit()
-    conn.close()
-
 def add_stats(command, value, success):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -302,7 +279,6 @@ async def start_account(account_data):
                 GROUP_OTHER = entity
             logger.info(f"✅ {var_name}: {entity.title} (ID: {entity.id})")
         except:
-            # fallback: search dialogs
             async for dialog in client.iter_dialogs():
                 if dialog.name == name:
                     if var_name == 'GROUP_MAIN':
@@ -360,25 +336,59 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= JSON EXTRACTION & CLEANING =================
+# ================= ROBUST JSON EXTRACTION =================
 def extract_json_from_text(text):
+    """Extract all valid JSON objects and merge them."""
+    if not text:
+        return None
+
+    # Try to find a valid JSON object by balancing braces
+    objects = []
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            depth = 0
+            j = i
+            while j < len(text):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[i:j+1]
+                        try:
+                            obj = json.loads(candidate)
+                            objects.append(obj)
+                            i = j
+                            break
+                        except:
+                            pass
+                j += 1
+        i += 1
+
+    if objects:
+        # Merge all objects (later keys override earlier)
+        merged = {}
+        for obj in objects:
+            merged.update(obj)
+        return merged
+
+    # If no objects found, try to extract from first { to last }
     start = text.find('{')
     end = text.rfind('}')
-    if start == -1 or end == -1 or end <= start:
-        return None
-    candidate = text[start:end+1]
-    try:
-        return json.loads(candidate)
-    except:
-        return None
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end+1]
+        try:
+            return json.loads(candidate)
+        except:
+            pass
+
+    return None
 
 def clean_response(obj):
     if isinstance(obj, dict):
-        remove_keys = ['developer_credits', 'telegram_channel', 'telegram_id']
         new_obj = {}
         for k, v in obj.items():
-            if k in remove_keys:
-                continue
             if k.lower() in ('tag', 'developer'):
                 new_obj[k] = DEVELOPER_TAG
             else:
@@ -416,15 +426,14 @@ def query_bot_sync(command_text, group_type):
 
     async def do_query():
         try:
-            # Send command using the entity object
             sent = await client.send_message(group, command_text)
             msg_id = sent.id
             logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.title}")
 
             bot_replies = []
-            for attempt in range(15):
-                await asyncio.sleep(2)
-                async for msg in client.iter_messages(group, limit=150):
+            for attempt in range(20):  # More attempts
+                await asyncio.sleep(1.5)
+                async for msg in client.iter_messages(group, limit=200):
                     if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
                         bot_replies.append(msg)
                         logger.info(f"📩 Found reply (attempt {attempt+1})")
@@ -438,6 +447,7 @@ def query_bot_sync(command_text, group_type):
                 await client.delete_messages(group, [msg_id])
                 return {"error": "Bot did not respond"}
 
+            # Deduplicate and sort
             seen = set()
             unique_replies = []
             for msg in bot_replies:
@@ -446,8 +456,9 @@ def query_bot_sync(command_text, group_type):
                     unique_replies.append(msg)
             unique_replies.sort(key=lambda m: m.date)
 
-            combined_text = "".join([m.raw_text for m in unique_replies])
-            data = extract_json_from_text(combined_text)
+            # Combine all raw texts
+            combined = "".join([m.raw_text for m in unique_replies])
+            data = extract_json_from_text(combined)
             if data is None:
                 await client.delete_messages(group, [msg_id] + [m.id for m in unique_replies])
                 return {"error": "No valid JSON found"}
@@ -465,9 +476,7 @@ def query_bot_sync(command_text, group_type):
     try:
         result = future.result(timeout=50)
         success = 'error' not in result
-        command_for_stats = command_text.split()[0] if command_text and ' ' in command_text else command_text
-        value_for_stats = command_text.split()[1] if command_text and len(command_text.split()) > 1 else ''
-        add_stats(command_for_stats, value_for_stats, success)
+        add_stats(command_text.split()[0] if command_text else 'unknown', command_text.split()[1] if len(command_text.split()) > 1 else '', success)
         return result
     except asyncio.TimeoutError:
         add_stats('timeout', '', False)
