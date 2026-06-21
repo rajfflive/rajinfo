@@ -11,8 +11,6 @@ from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
-from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonUrl
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,15 +24,13 @@ CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
 GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
 GROUP_OTHER_NAME = "TGTOINFO"
 BOT_USERNAME = "usersXinfo0bot"
-DEFAULT_DADDY_BOT = "Daddyinfosbot"
 
 GROUP_MAIN = None
 GROUP_OTHER = None
 BOT_ID = None
-DADDY_BOT_ID = None
 SPECIAL_COMMANDS = ["upiinfo", "fam", "family", "pan", "tg", "leak"]
 
-# ================= DATABASE (unchanged) =================
+# ================= DATABASE =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -47,8 +43,7 @@ def init_db():
                   api_hash TEXT,
                   session_string TEXT,
                   active INTEGER DEFAULT 1,
-                  last_used TIMESTAMP,
-                  daddy_bot TEXT)''')
+                  last_used TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS api_keys
                  (key TEXT PRIMARY KEY,
                   name TEXT,
@@ -84,35 +79,15 @@ def init_db():
                   value TEXT,
                   success INTEGER,
                   timestamp TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS global_settings
-                 (key TEXT PRIMARY KEY,
-                  value TEXT)''')
-    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('daddy_bot_username', ?)", (DEFAULT_DADDY_BOT,))
-    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('daddy_enabled', '1')")
     conn.commit()
     conn.close()
 init_db()
 
 # ---------- DB HELPERS ----------
-def get_global_setting(key):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT value FROM global_settings WHERE key=?", (key,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
-
-def set_global_setting(key, value):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO global_settings (key, value) VALUES (?,?)", (key, value))
-    conn.commit()
-    conn.close()
-
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT id, name, api_id, api_hash, session_string, daddy_bot FROM accounts WHERE active=1 ORDER BY last_used NULLS FIRST")
+    c.execute("SELECT id, name, api_id, api_hash, session_string FROM accounts WHERE active=1 ORDER BY last_used NULLS FIRST")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -124,11 +99,11 @@ def update_account_last_used(account_id):
     conn.commit()
     conn.close()
 
-def add_account(name, api_id, api_hash, session_string, daddy_bot=None):
+def add_account(name, api_id, api_hash, session_string):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT INTO accounts (name, api_id, api_hash, session_string, daddy_bot) VALUES (?,?,?,?,?)",
-              (name, api_id, api_hash, session_string, daddy_bot))
+    c.execute("INSERT INTO accounts (name, api_id, api_hash, session_string) VALUES (?,?,?,?)",
+              (name, api_id, api_hash, session_string))
     conn.commit()
     conn.close()
 
@@ -146,20 +121,13 @@ def toggle_account(account_id, active):
     conn.commit()
     conn.close()
 
-def update_account_daddy_bot(account_id, daddy_bot):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE accounts SET daddy_bot = ? WHERE id = ?", (daddy_bot, account_id))
-    conn.commit()
-    conn.close()
-
 def get_all_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT id, name, api_id, active, daddy_bot FROM accounts")
+    c.execute("SELECT id, name, api_id, active FROM accounts")
     rows = c.fetchall()
     conn.close()
-    return [{"id": r[0], "name": r[1], "api_id": r[2], "active": bool(r[3]), "daddy_bot": r[4]} for r in rows]
+    return [{"id": r[0], "name": r[1], "api_id": r[2], "active": bool(r[3])} for r in rows]
 
 def add_api_key(key, name, owner, expiry_days, daily_limit, unlimited=0):
     conn = sqlite3.connect(DB_FILE)
@@ -315,12 +283,11 @@ def get_next_account():
     return accounts[account_index]
 
 async def start_account(account_data):
-    global GROUP_MAIN, GROUP_OTHER, BOT_ID, DADDY_BOT_ID
+    global GROUP_MAIN, GROUP_OTHER, BOT_ID
     acc_id = account_data['id']
     api_id = account_data['api_id']
     api_hash = account_data['api_hash']
     session = account_data['session_string']
-    daddy_bot_username = account_data.get('daddy_bot') or get_global_setting('daddy_bot_username') or DEFAULT_DADDY_BOT
     client = TelegramClient(StringSession(session), api_id, api_hash)
     await client.start()
     logger.info(f"✅ Account {account_data['name']} (ID: {acc_id}) connected")
@@ -335,6 +302,7 @@ async def start_account(account_data):
                 GROUP_OTHER = entity
             logger.info(f"✅ {var_name}: {entity.title} (ID: {entity.id})")
         except:
+            # fallback: search dialogs
             async for dialog in client.iter_dialogs():
                 if dialog.name == name:
                     if var_name == 'GROUP_MAIN':
@@ -351,13 +319,6 @@ async def start_account(account_data):
     except:
         logger.warning(f"⚠️ Could not fetch bot {BOT_USERNAME}")
 
-    try:
-        daddy_entity = await client.get_entity(daddy_bot_username)
-        DADDY_BOT_ID = daddy_entity.id
-        logger.info(f"✅ Daddy Bot ID: {DADDY_BOT_ID} (using {daddy_bot_username})")
-    except:
-        logger.warning(f"⚠️ Could not fetch Daddy bot {daddy_bot_username}")
-
     if GROUP_OTHER:
         try:
             await client.send_message(GROUP_OTHER, "Started ✅")
@@ -367,7 +328,7 @@ async def start_account(account_data):
 
     @client.on(events.NewMessage)
     async def handler(event):
-        if event.sender_id == BOT_ID or event.sender_id == DADDY_BOT_ID:
+        if event.sender_id == BOT_ID:
             logger.info(f"📩 Bot message seen: {event.raw_text[:50]}...")
 
     await client.run_until_disconnected()
@@ -376,8 +337,8 @@ def init_accounts():
     global accounts
     rows = get_active_accounts()
     for row in rows:
-        acc_id, name, api_id, api_hash, session_str, daddy_bot = row
-        accounts.append({"id": acc_id, "name": name, "api_id": api_id, "api_hash": api_hash, "session_string": session_str, "daddy_bot": daddy_bot})
+        acc_id, name, api_id, api_hash, session_str = row
+        accounts.append({"id": acc_id, "name": name, "api_id": api_id, "api_hash": api_hash, "session_string": session_str})
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         telegram_loops[acc_id] = loop
@@ -391,10 +352,9 @@ def init_accounts():
             api_id = os.environ.get(f"ACCOUNT{i}_API_ID")
             api_hash = os.environ.get(f"ACCOUNT{i}_API_HASH")
             session_str = os.environ.get(f"ACCOUNT{i}_SESSION")
-            daddy_bot = os.environ.get(f"ACCOUNT{i}_DADDY_BOT")
             if not all([name, api_id, api_hash, session_str]):
                 break
-            add_account(name, int(api_id), api_hash, session_str, daddy_bot)
+            add_account(name, int(api_id), api_hash, session_str)
             logger.info(f"Added {name} from env")
             i += 1
         if i > 1:
@@ -419,11 +379,10 @@ def clean_response(obj):
         for k, v in obj.items():
             if k in remove_keys:
                 continue
-            cleaned_val = clean_response(v)
             if k.lower() in ('tag', 'developer'):
                 new_obj[k] = DEVELOPER_TAG
             else:
-                new_obj[k] = cleaned_val
+                new_obj[k] = clean_response(v)
         return new_obj
     elif isinstance(obj, list):
         return [clean_response(item) for item in obj]
@@ -438,83 +397,8 @@ def finalize_response(data):
     cleaned['tag'] = DEVELOPER_TAG
     return cleaned
 
-# ================= DADDY BOT QUERY (FIXED) =================
-async def query_daddy_bot_async(client, value, daddy_bot_name):
-    if value.startswith('@'):
-        value = value[1:]
-    sent = await client.send_message(daddy_bot_name, value)
-    logger.info(f"📤 Sent plain '{value}' to {daddy_bot_name}")
-
-    # Wait for the bot to respond with inline keyboard
-    await asyncio.sleep(3)
-
-    # Find the message that is a reply to our command and has a "Telegram" button
-    target_msg = None
-    button_data = None
-    async for msg in client.iter_messages(daddy_bot_name, limit=20):
-        if msg.reply_to_msg_id == sent.id and msg.reply_markup:
-            for row in msg.reply_markup.rows:
-                for btn in row.buttons:
-                    if isinstance(btn, KeyboardButtonCallback) and "telegram" in btn.text.lower():
-                        target_msg = msg
-                        button_data = btn.data
-                        break
-                if button_data:
-                    break
-            if button_data:
-                break
-
-    if not button_data:
-        # Fallback: look for any message with inline keyboard containing "Telegram" (case-insensitive)
-        async for msg in client.iter_messages(daddy_bot_name, limit=20):
-            if msg.reply_markup:
-                for row in msg.reply_markup.rows:
-                    for btn in row.buttons:
-                        if isinstance(btn, KeyboardButtonCallback) and "telegram" in btn.text.lower():
-                            target_msg = msg
-                            button_data = btn.data
-                            break
-                    if button_data:
-                        break
-                if button_data:
-                    break
-            if button_data:
-                break
-
-    if not button_data:
-        return {"error": "No 'Telegram' button found"}
-
-    logger.info(f"🖱️ Clicking 'Telegram' button on message {target_msg.id}")
-    try:
-        await client(GetBotCallbackAnswerRequest(
-            peer=daddy_bot_name,
-            msg_id=target_msg.id,
-            data=button_data
-        ))
-    except Exception as e:
-        logger.warning(f"Callback click error (ignored): {e}")
-
-    # Wait for the info message (the bot sends a new message with details)
-    await asyncio.sleep(5)
-
-    # Fetch recent messages from the bot, excluding the command and the button message
-    info_msgs = []
-    async for msg in client.iter_messages(daddy_bot_name, limit=10):
-        if msg.sender_id == DADDY_BOT_ID and msg.id != sent.id and msg.id != target_msg.id:
-            info_msgs.append(msg)
-
-    if not info_msgs:
-        return {"error": "No info message received after button click"}
-
-    combined = "".join([m.raw_text for m in info_msgs])
-    data = extract_json_from_text(combined)
-    if data is None:
-        # Return as raw text under "info" key
-        return {"info": combined}
-    return data
-
 # ================= QUERY FUNCTION =================
-def query_bot_sync(command_text, group_type, bot_type="main"):
+def query_bot_sync(command_text, group_type):
     account = get_next_account()
     if not account:
         return {"error": "No active Telegram accounts"}
@@ -526,20 +410,13 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
     if loop is None:
         return {"error": "Event loop not found"}
 
+    group = GROUP_MAIN if group_type == "main" else GROUP_OTHER
+    if group is None:
+        return {"error": f"Group '{group_type}' not found"}
+
     async def do_query():
         try:
-            if bot_type == "daddy":
-                if get_global_setting('daddy_enabled') != '1':
-                    return {"error": "Daddy bot is disabled globally"}
-                daddy_bot = account.get('daddy_bot') or get_global_setting('daddy_bot_username') or DEFAULT_DADDY_BOT
-                return await query_daddy_bot_async(client, command_text, daddy_bot)
-
-            # Normal command: send to the group entity
-            group = GROUP_MAIN if group_type == "main" else GROUP_OTHER
-            if group is None:
-                return {"error": f"Group '{group_type}' not found"}
-
-            # Use the entity object directly, not group.id
+            # Send command using the entity object
             sent = await client.send_message(group, command_text)
             msg_id = sent.id
             logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.title}")
@@ -630,7 +507,7 @@ def require_api_key(f):
     return decorated
 
 # ================= API ENDPOINTS =================
-ALL_COMMANDS = ["num", "veh", "vnum", "upiinfo", "fam", "insta", "ip", "email", "tg", "ifsc", "adhar", "imei", "pak", "family", "gst", "bomber", "pan", "leak", "daddy"]
+ALL_COMMANDS = ["num", "veh", "vnum", "upiinfo", "fam", "insta", "ip", "email", "tg", "ifsc", "adhar", "imei", "pak", "family", "gst", "bomber", "pan", "leak"]
 
 for cmd in ALL_COMMANDS:
     def make_endpoint(cmd):
@@ -643,11 +520,8 @@ for cmd in ALL_COMMANDS:
                 add_stats(cmd, value, True)
                 return jsonify(cached)
 
-            if cmd == "daddy":
-                result = query_bot_sync(value, None, bot_type="daddy")
-            else:
-                group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
-                result = query_bot_sync(f"/{cmd} {value}", group_type)
+            group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
+            result = query_bot_sync(f"/{cmd} {value}", group_type)
             result = finalize_response(result)
             if "error" not in result:
                 set_cache(cmd, value, result)
@@ -665,7 +539,7 @@ def statu_endpoint():
     add_stats("statu", "", 'error' not in result)
     return jsonify(result)
 
-# ================= ADMIN PANEL (unchanged) =================
+# ================= ADMIN PANEL =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -682,7 +556,7 @@ ADMIN_HTML = """
         table { width: 100%; border-collapse: collapse; }
         th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
         th { background: #f2f2f2; }
-        input, textarea, select { padding: 8px; width: 100%; margin: 5px 0; border: 1px solid #ddd; border-radius: 4px; }
+        input, textarea { padding: 8px; width: 100%; margin: 5px 0; border: 1px solid #ddd; border-radius: 4px; }
         button { padding: 10px 20px; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; }
         .danger { background: #f44336; }
         .success { background: #4CAF50; }
@@ -697,7 +571,6 @@ ADMIN_HTML = """
         <div class="tab" onclick="showTab('accounts')">Accounts</div>
         <div class="tab" onclick="showTab('logs')">Usage Logs</div>
         <div class="tab" onclick="showTab('status')">Status</div>
-        <div class="tab" onclick="showTab('settings')">Bot Settings</div>
         <div style="margin-left:auto;"><a href="/admin/logout" style="color:red;">Logout</a></div>
     </div>
     <div id="keys" class="panel">
@@ -736,26 +609,18 @@ ADMIN_HTML = """
             <input type="number" name="api_id" placeholder="API ID" required>
             <input type="text" name="api_hash" placeholder="API Hash" required>
             <textarea name="session_string" placeholder="Session String" rows="3" required></textarea>
-            <input type="text" name="daddy_bot" placeholder="Daddy Bot Username (optional)">
             <button type="submit" class="success">Add Account</button>
         </form>
         <hr>
         <h2>Active Accounts</h2>
         <table>
-            <tr><th>ID</th><th>Name</th><th>API ID</th><th>Status</th><th>Daddy Bot</th><th>Update Daddy Bot</th><th>Actions</th></tr>
+            <tr><th>ID</th><th>Name</th><th>API ID</th><th>Status</th><th>Actions</th></tr>
             {% for acc in accounts %}
             <tr>
                 <td>{{ acc.id }}</td>
                 <td>{{ acc.name }}</td>
                 <td>{{ acc.api_id }}</td>
                 <td>{{ '✅' if acc.active else '❌' }}</td>
-                <td>{{ acc.daddy_bot or 'Default' }}</td>
-                <td>
-                    <form method="POST" action="/admin/update_account/{{ acc.id }}" style="display:flex; gap:5px;">
-                        <input type="text" name="daddy_bot" value="{{ acc.daddy_bot or '' }}" placeholder="Daddy bot username" style="flex:1;">
-                        <button type="submit" class="success" style="padding:5px 10px;">Update</button>
-                    </form>
-                </td>
                 <td>
                     <a href="/admin/toggle_account/{{ acc.id }}">{{ 'Disable' if acc.active else 'Enable' }}</a>
                     <a href="/admin/delete_account/{{ acc.id }}" onclick="return confirm('Delete?')">Delete</a>
@@ -789,52 +654,11 @@ ADMIN_HTML = """
         <p><strong>Main Group (Special):</strong> {{ group_main_name }}</p>
         <p><strong>Other Group:</strong> {{ group_other_name }}</p>
         <p><strong>Bot ID:</strong> {{ bot_id or 'Not fetched' }}</p>
-        <p><strong>Daddy Bot ID:</strong> {{ daddy_bot_id or 'Not fetched' }}</p>
         <hr>
         <h3>API Stats</h3>
         <p><strong>Total Requests:</strong> {{ stats.total }}</p>
         <p><strong>✅ Success:</strong> {{ stats.success }}</p>
         <p><strong>❌ Failed:</strong> {{ stats.fail }}</p>
-    </div>
-    <div id="settings" class="panel" style="display:none;">
-        <h2>Global Bot Settings</h2>
-        <form method="POST" action="/admin/update_global_settings">
-            <h3>Daddy Bot (Fallback)</h3>
-            <label>Bot Username (without @):</label>
-            <input type="text" name="daddy_bot_username" value="{{ daddy_bot_username }}" placeholder="e.g., Daddyinfosbot">
-            <label>Enable Daddy Bot:</label>
-            <select name="daddy_enabled">
-                <option value="1" {% if daddy_enabled == '1' %}selected{% endif %}>ON</option>
-                <option value="0" {% if daddy_enabled == '0' %}selected{% endif %}>OFF</option>
-            </select>
-            <button type="submit" class="success">Update</button>
-        </form>
-        <hr>
-        <h3>Toggle Group Commands</h3>
-        <form method="POST" action="/admin/toggle_bot">
-            <input type="text" name="group_name" placeholder="Group Name (e.g., TGTOINFO)" required>
-            <input type="text" name="bot_name" placeholder="Bot username (e.g., usersXinfo0bot)" required>
-            <input type="text" name="command" placeholder="Command (e.g., num, daddy)" required>
-            <select name="enabled">
-                <option value="1">ON</option>
-                <option value="0">OFF</option>
-            </select>
-            <button type="submit" class="success">Set</button>
-        </form>
-        <hr>
-        <h3>Current Settings</h3>
-        <table>
-            <tr><th>Group</th><th>Bot</th><th>Command</th><th>Status</th></tr>
-            {% for setting in settings %}
-            <tr>
-                <td>{{ setting.group }}</td>
-                <td>{{ setting.bot }}</td>
-                <td>{{ setting.command }}</td>
-                <td>{{ '✅' if setting.enabled else '❌' }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-        <p><i>Default: All enabled. Use the form to override.</i></p>
     </div>
 </div>
 <script>
@@ -868,19 +692,8 @@ def admin_dashboard():
     keys = get_all_keys()
     accounts = get_all_accounts()
     logs = get_usage_logs(100)
-    # Fetch settings
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT group_id, bot_name, command, enabled FROM bot_settings")
-    settings_raw = c.fetchall()
-    conn.close()
-    settings = [{"group": r[0], "bot": r[1], "command": r[2], "enabled": bool(r[3])} for r in settings_raw]
-    # Stats
     total, success, fail = get_stats()
     stats = {"total": total, "success": success, "fail": fail}
-    # Global settings
-    daddy_bot_username = get_global_setting('daddy_bot_username') or DEFAULT_DADDY_BOT
-    daddy_enabled = get_global_setting('daddy_enabled') or '1'
     return render_template_string(ADMIN_HTML,
                                  keys=keys,
                                  accounts=accounts,
@@ -891,11 +704,7 @@ def admin_dashboard():
                                  group_main_name=GROUP_MAIN_NAME,
                                  group_other_name=GROUP_OTHER_NAME,
                                  bot_id=BOT_ID,
-                                 daddy_bot_id=DADDY_BOT_ID,
-                                 settings=settings,
-                                 stats=stats,
-                                 daddy_bot_username=daddy_bot_username,
-                                 daddy_enabled=daddy_enabled)
+                                 stats=stats)
 
 @app.route('/admin/clear_cache')
 @admin_login_required
@@ -934,34 +743,22 @@ def admin_add_account():
     api_id = int(request.form.get('api_id'))
     api_hash = request.form.get('api_hash')
     session_string = request.form.get('session_string')
-    daddy_bot = request.form.get('daddy_bot', '').strip() or None
     if not all([name, api_id, api_hash, session_string]):
         return "All fields required", 400
-    add_account(name, api_id, api_hash, session_string, daddy_bot)
+    add_account(name, api_id, api_hash, session_string)
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT id FROM accounts WHERE name=? AND api_id=? AND active=1 ORDER BY id DESC LIMIT 1", (name, api_id))
     row = c.fetchone()
     conn.close()
     if row:
-        new_acc = {"id": row[0], "name": name, "api_id": api_id, "api_hash": api_hash, "session_string": session_string, "daddy_bot": daddy_bot}
+        new_acc = {"id": row[0], "name": name, "api_id": api_id, "api_hash": api_hash, "session_string": session_string}
         accounts.append(new_acc)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         telegram_loops[new_acc["id"]] = loop
         thread = threading.Thread(target=lambda: loop.run_until_complete(start_account(new_acc)), daemon=True)
         thread.start()
-    return redirect(url_for('admin_dashboard'))
-
-@app.route('/admin/update_account/<int:acc_id>', methods=['POST'])
-@admin_login_required
-def admin_update_account(acc_id):
-    daddy_bot = request.form.get('daddy_bot', '').strip() or None
-    update_account_daddy_bot(acc_id, daddy_bot)
-    for acc in accounts:
-        if acc['id'] == acc_id:
-            acc['daddy_bot'] = daddy_bot
-            break
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/toggle_account/<int:acc_id>')
@@ -982,33 +779,6 @@ def admin_delete_account(acc_id):
     delete_account(acc_id)
     global accounts
     accounts = [a for a in accounts if a['id'] != acc_id]
-    return redirect(url_for('admin_dashboard'))
-
-@app.route('/admin/toggle_bot', methods=['POST'])
-@admin_login_required
-def admin_toggle_bot():
-    group_name = request.form.get('group_name')
-    bot_name = request.form.get('bot_name')
-    command = request.form.get('command')
-    enabled = int(request.form.get('enabled', 1))
-    group_id = None
-    for g in [GROUP_MAIN, GROUP_OTHER]:
-        if g and g.title == group_name:
-            group_id = g.id
-            break
-    if group_id is None:
-        return "Group not found", 400
-    set_bot_setting(group_id, bot_name, command, enabled)
-    return redirect(url_for('admin_dashboard'))
-
-@app.route('/admin/update_global_settings', methods=['POST'])
-@admin_login_required
-def admin_update_global_settings():
-    daddy_bot_username = request.form.get('daddy_bot_username', '').strip()
-    daddy_enabled = request.form.get('daddy_enabled', '1')
-    if daddy_bot_username:
-        set_global_setting('daddy_bot_username', daddy_bot_username)
-    set_global_setting('daddy_enabled', daddy_enabled)
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/logout')
