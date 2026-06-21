@@ -77,6 +77,13 @@ def init_db():
                   command TEXT,
                   enabled INTEGER DEFAULT 1,
                   PRIMARY KEY (group_id, bot_name, command))''')
+    # Stats table
+    c.execute('''CREATE TABLE IF NOT EXISTS stats
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  command TEXT,
+                  value TEXT,
+                  success INTEGER,
+                  timestamp TIMESTAMP)''')
     conn.commit()
     conn.close()
 init_db()
@@ -222,6 +229,26 @@ def set_bot_setting(group_id, bot_name, command, enabled):
               (group_id, bot_name, command, 1 if enabled else 0))
     conn.commit()
     conn.close()
+
+# Stats helpers
+def add_stats(command, value, success):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO stats (command, value, success, timestamp) VALUES (?,?,?,?)",
+              (command, value, 1 if success else 0, datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_stats():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM stats")
+    total = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM stats WHERE success=1")
+    success = c.fetchone()[0]
+    fail = total - success
+    conn.close()
+    return total, success, fail
 
 # ================= CACHE =================
 response_cache = {}
@@ -384,15 +411,8 @@ def finalize_response(data):
     return cleaned
 
 # ================= DADDY BOT QUERY =================
-async def query_daddy_bot_async(value):
-    account = get_next_account()
-    if not account:
-        return {"error": "No active Telegram accounts"}
-    acc_id = account['id']
-    client = account_clients.get(acc_id)
-    if client is None:
-        return {"error": "Account not ready"}
-
+async def query_daddy_bot_async(client, value):
+    """Send /info <value> to Daddy bot using the given client."""
     sent = await client.send_message(DADDY_BOT_USERNAME, f"/info {value}")
     logger.info(f"📤 Sent /info {value} to Daddy bot")
 
@@ -457,60 +477,70 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
         return {"error": "Event loop not found"}
 
     async def do_query():
-        if bot_type == "daddy":
-            return await query_daddy_bot_async(command_text.split()[1])
+        try:
+            if bot_type == "daddy":
+                return await query_daddy_bot_async(client, command_text.split()[1])
 
-        group = GROUP_MAIN if group_type == "main" else GROUP_OTHER
-        if group is None:
-            return {"error": f"Group '{group_type}' not found"}
+            group = GROUP_MAIN if group_type == "main" else GROUP_OTHER
+            if group is None:
+                return {"error": f"Group '{group_type}' not found"}
 
-        sent = await client.send_message(group, command_text)
-        msg_id = sent.id
-        logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
+            sent = await client.send_message(group, command_text)
+            msg_id = sent.id
+            logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
 
-        bot_replies = []
-        for attempt in range(15):
-            await asyncio.sleep(2)
-            async for msg in client.iter_messages(group, limit=150):
-                if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
-                    bot_replies.append(msg)
-                    logger.info(f"📩 Found reply (attempt {attempt+1})")
-                elif msg.sender_id == BOT_ID and command_text.split()[1] in msg.raw_text:
-                    bot_replies.append(msg)
-                    logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
-            if bot_replies:
-                break
+            bot_replies = []
+            for attempt in range(15):
+                await asyncio.sleep(2)
+                async for msg in client.iter_messages(group, limit=150):
+                    if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
+                        bot_replies.append(msg)
+                        logger.info(f"📩 Found reply (attempt {attempt+1})")
+                    elif msg.sender_id == BOT_ID and command_text.split()[1] in msg.raw_text:
+                        bot_replies.append(msg)
+                        logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
+                if bot_replies:
+                    break
 
-        if not bot_replies:
-            await client.delete_messages(group, [msg_id])
-            return {"error": "Bot did not respond"}
+            if not bot_replies:
+                await client.delete_messages(group, [msg_id])
+                return {"error": "Bot did not respond"}
 
-        seen = set()
-        unique_replies = []
-        for msg in bot_replies:
-            if msg.id not in seen:
-                seen.add(msg.id)
-                unique_replies.append(msg)
-        unique_replies.sort(key=lambda m: m.date)
+            seen = set()
+            unique_replies = []
+            for msg in bot_replies:
+                if msg.id not in seen:
+                    seen.add(msg.id)
+                    unique_replies.append(msg)
+            unique_replies.sort(key=lambda m: m.date)
 
-        combined_text = "".join([m.raw_text for m in unique_replies])
-        data = extract_json_from_text(combined_text)
-        if data is None:
-            await client.delete_messages(group, [msg_id] + [m.id for m in unique_replies])
-            return {"error": "No valid JSON found"}
+            combined_text = "".join([m.raw_text for m in unique_replies])
+            data = extract_json_from_text(combined_text)
+            if data is None:
+                await client.delete_messages(group, [msg_id] + [m.id for m in unique_replies])
+                return {"error": "No valid JSON found"}
 
-        cleaned = finalize_response(data)
-        to_delete = [msg_id] + [m.id for m in unique_replies]
-        await client.delete_messages(group, to_delete)
-        logger.info(f"🗑️ Deleted {len(to_delete)} messages")
-        return cleaned
+            cleaned = finalize_response(data)
+            to_delete = [msg_id] + [m.id for m in unique_replies]
+            await client.delete_messages(group, to_delete)
+            logger.info(f"🗑️ Deleted {len(to_delete)} messages")
+            return cleaned
+        except Exception as e:
+            logger.error(f"Query error: {e}")
+            return {"error": str(e)}
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
-        return future.result(timeout=50)
+        result = future.result(timeout=50)
+        # Log stats
+        success = 'error' not in result
+        add_stats(command_text.split()[0] if command_text else 'unknown', command_text.split()[1] if len(command_text.split()) > 1 else '', success)
+        return result
     except asyncio.TimeoutError:
+        add_stats('timeout', '', False)
         return {"error": "Request timed out"}
     except Exception as e:
+        add_stats('exception', '', False)
         return {"error": str(e)}
 
 # ================= AUTH =================
@@ -554,6 +584,7 @@ for cmd in ALL_COMMANDS:
             if cached is not None:
                 cached = finalize_response(cached)
                 log_usage(request.api_key, cmd, value, json.dumps(cached), True, None)
+                add_stats(cmd, value, True)
                 return jsonify(cached)
 
             if cmd == "daddy":
@@ -565,6 +596,7 @@ for cmd in ALL_COMMANDS:
             if "error" not in result:
                 set_cache(cmd, value, result)
             log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
+            # Stats are already logged inside query_bot_sync, but we also log here for cache hits
             return jsonify(result)
         return endpoint
     app.add_url_rule(f'/{cmd}/<value>', f'api_{cmd}', make_endpoint(cmd), methods=['GET'])
@@ -575,6 +607,7 @@ def statu_endpoint():
     result = query_bot_sync("/statu", "other")
     result = finalize_response(result)
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
+    add_stats("statu", "", 'error' not in result)
     return jsonify(result)
 
 # ================= ADMIN PANEL =================
@@ -685,7 +718,7 @@ ADMIN_HTML = """
         </table>
     </div>
     <div id="status" class="panel" style="display:none;">
-        <h2>Status</h2>
+        <h2>System Status</h2>
         <p><strong>Active Accounts:</strong> {{ accounts|length }}</p>
         <p><strong>API Keys:</strong> {{ keys|length }}</p>
         <p><strong>Cache Entries:</strong> {{ cache_size }}</p>
@@ -694,6 +727,11 @@ ADMIN_HTML = """
         <p><strong>Other Group:</strong> {{ group_other_name }}</p>
         <p><strong>Bot ID:</strong> {{ bot_id or 'Not fetched' }}</p>
         <p><strong>Daddy Bot ID:</strong> {{ daddy_bot_id or 'Not fetched' }}</p>
+        <hr>
+        <h3>API Stats</h3>
+        <p><strong>Total Requests:</strong> {{ stats.total }}</p>
+        <p><strong>✅ Success:</strong> {{ stats.success }}</p>
+        <p><strong>❌ Failed:</strong> {{ stats.fail }}</p>
     </div>
     <div id="settings" class="panel" style="display:none;">
         <h2>Bot Settings (Toggle ON/OFF)</h2>
@@ -761,6 +799,9 @@ def admin_dashboard():
     settings_raw = c.fetchall()
     conn.close()
     settings = [{"group": r[0], "bot": r[1], "command": r[2], "enabled": bool(r[3])} for r in settings_raw]
+    # Stats
+    total, success, fail = get_stats()
+    stats = {"total": total, "success": success, "fail": fail}
     return render_template_string(ADMIN_HTML,
                                  keys=keys,
                                  accounts=accounts,
@@ -772,7 +813,8 @@ def admin_dashboard():
                                  group_other_name=GROUP_OTHER_NAME,
                                  bot_id=BOT_ID,
                                  daddy_bot_id=DADDY_BOT_ID,
-                                 settings=settings)
+                                 settings=settings,
+                                 stats=stats)
 
 @app.route('/admin/clear_cache')
 @admin_login_required
