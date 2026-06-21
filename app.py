@@ -13,6 +13,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
 from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonUrl
+from telethon.errors import RPCCallError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -445,91 +446,71 @@ async def query_daddy_bot_async(client, value, daddy_bot_name):
     sent = await client.send_message(daddy_bot_name, value)
     logger.info(f"📤 Sent plain '{value}' to {daddy_bot_name}")
 
-    # Wait for bot to respond
+    # Wait for bot to respond with inline buttons
     await asyncio.sleep(3)
 
-    # Fetch recent messages from the bot (limit 20)
+    # Fetch recent messages from the bot
     bot_messages = []
     async for msg in client.iter_messages(daddy_bot_name, limit=20):
         bot_messages.append(msg)
     if not bot_messages:
         return {"error": "No messages from Daddy bot"}
 
-    # Find the message that has inline buttons and contains "Telegram"
+    # Find the message with inline buttons containing "Telegram"
     target_msg = None
     button_data = None
     for msg in bot_messages:
         if msg.reply_markup:
             for row in msg.reply_markup.rows:
                 for btn in row.buttons:
-                    # Look for a button with text containing "Telegram" (case-insensitive)
-                    if "telegram" in btn.text.lower():
-                        if isinstance(btn, KeyboardButtonCallback):
-                            target_msg = msg
-                            button_data = btn.data
-                            logger.info(f"✅ Found Telegram callback button in message {msg.id}")
-                            break
-                        elif isinstance(btn, KeyboardButtonUrl):
-                            continue
+                    if isinstance(btn, KeyboardButtonCallback) and "telegram" in btn.text.lower():
+                        target_msg = msg
+                        button_data = btn.data
+                        break
                 if button_data:
                     break
             if button_data:
                 break
 
-    # Fallback: try to find any callback button with text "Telegram" or "Телеграм"
     if not button_data:
-        for msg in bot_messages:
-            if msg.reply_markup:
-                for row in msg.reply_markup.rows:
-                    for btn in row.buttons:
-                        if isinstance(btn, KeyboardButtonCallback):
-                            if "telegram" in btn.text.lower() or "телеграм" in btn.text.lower():
-                                target_msg = msg
-                                button_data = btn.data
-                                break
-                    if button_data:
-                        break
-            if button_data:
-                break
+        return {"error": "No 'Telegram' button found"}
 
-    # Last resort: click the first callback button
-    if not button_data:
-        for msg in bot_messages:
-            if msg.reply_markup:
-                for row in msg.reply_markup.rows:
-                    for btn in row.buttons:
-                        if isinstance(btn, KeyboardButtonCallback):
-                            target_msg = msg
-                            button_data = btn.data
-                            logger.info("⚠️ Using first callback button as fallback")
-                            break
-                    if button_data:
-                        break
-            if button_data:
-                break
+    logger.info(f"🖱️ Clicking 'Telegram' button on message {target_msg.id}")
+    # Try to click the button; ignore errors if the bot doesn't respond to callback quickly
+    try:
+        await client(GetBotCallbackAnswerRequest(
+            peer=daddy_bot_name,
+            msg_id=target_msg.id,
+            data=button_data
+        ))
+    except Exception as e:
+        logger.warning(f"Callback click error (ignored): {e}")
 
-    if not button_data:
-        return {"error": "No 'Telegram' button found after multiple attempts"}
+    # Wait for the final info message (the bot sends a new message with details)
+    await asyncio.sleep(5)  # give time for the bot to send the info
 
-    logger.info(f"🖱️ Clicking button on message {target_msg.id}")
-    await client(GetBotCallbackAnswerRequest(
-        peer=daddy_bot_name,
-        msg_id=target_msg.id,
-        data=button_data
-    ))
-
-    # Wait for final response (info)
-    await asyncio.sleep(4)
+    # Fetch the latest messages from the bot (the info message)
     final_msgs = []
     async for msg in client.iter_messages(daddy_bot_name, limit=10):
-        if msg.date > target_msg.date and msg.sender_id == DADDY_BOT_ID:
+        # The info message will be from the bot and contain the ID or contacts
+        if msg.sender_id == DADDY_BOT_ID and msg.id != target_msg.id and msg.id != sent.id:
+            # Check if it contains the target value or "Контактные" (contacts) as a clue
+            # We'll just take the last non-command message
             final_msgs.append(msg)
     if not final_msgs:
-        return {"error": "No info received after button click"}
+        # Fallback: take the most recent message from the bot
+        async for msg in client.iter_messages(daddy_bot_name, limit=1):
+            if msg.sender_id == DADDY_BOT_ID:
+                final_msgs.append(msg)
 
+    if not final_msgs:
+        return {"error": "No info message received after button click"}
+
+    # Combine text of all final messages (in case it's split)
     combined = "".join([m.raw_text for m in final_msgs])
     data = extract_json_from_text(combined)
     if data is None:
+        # If no JSON, return the raw text as an object
         return {"raw": combined}
     return data
 
