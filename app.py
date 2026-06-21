@@ -20,6 +20,7 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 PERMANENT_KEY = "felix_unlimited_2024"
 DEVELOPER_TAG = "@rajfflive"
 CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
+MAX_RESULTS = 4  # Only top 4 results
 
 GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
 GROUP_OTHER_NAME = "TGTOINFO"
@@ -30,7 +31,7 @@ GROUP_OTHER = None
 BOT_ID = None
 SPECIAL_COMMANDS = ["upiinfo", "fam", "family", "pan", "tg", "leak"]
 
-# ================= DATABASE (unchanged) =================
+# ================= DATABASE =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -77,7 +78,7 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- DB HELPERS (unchanged) ----------
+# ---------- DB HELPERS ----------
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -336,12 +337,12 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= JSON EXTRACTION: RETURN ALL OBJECTS =================
-def extract_json_objects(text):
-    """Extract all balanced JSON objects from text and return a list."""
+# ================= JSON EXTRACTION (LIMITED TO MAX_RESULTS) =================
+def extract_json_objects(text, limit=MAX_RESULTS):
+    """Extract up to 'limit' balanced JSON objects from text."""
     objects = []
     i = 0
-    while i < len(text):
+    while i < len(text) and len(objects) < limit:
         if text[i] == '{':
             depth = 0
             j = i
@@ -364,7 +365,6 @@ def extract_json_objects(text):
     return objects
 
 def clean_object(obj):
-    """Recursively replace 'tag' and 'developer' keys, and add DEVELOPER_TAG."""
     if isinstance(obj, dict):
         new_obj = {}
         for k, v in obj.items():
@@ -379,16 +379,25 @@ def clean_object(obj):
         return obj
 
 def finalize_response(data):
-    """If data is a dict, clean and add tags. If list, clean each item."""
+    """If data is a dict, clean and add tags. If list, clean each item and limit to MAX_RESULTS."""
     if data is None:
         return None
     if isinstance(data, dict):
+        if 'data' in data and isinstance(data['data'], list):
+            data['data'] = data['data'][:MAX_RESULTS]
         cleaned = clean_object(data)
         cleaned['developer'] = DEVELOPER_TAG
         cleaned['tag'] = DEVELOPER_TAG
         return cleaned
     elif isinstance(data, list):
-        return [finalize_response(item) for item in data]
+        limited = data[:MAX_RESULTS]
+        cleaned_list = []
+        for item in limited:
+            cleaned = clean_object(item)
+            cleaned['developer'] = DEVELOPER_TAG
+            cleaned['tag'] = DEVELOPER_TAG
+            cleaned_list.append(cleaned)
+        return cleaned_list
     else:
         return data
 
@@ -432,7 +441,6 @@ def query_bot_sync(command_text, group_type):
                 await client.delete_messages(group, [msg_id])
                 return {"error": "Bot did not respond"}
 
-            # Deduplicate and sort
             seen = set()
             unique_replies = []
             for msg in bot_replies:
@@ -441,13 +449,10 @@ def query_bot_sync(command_text, group_type):
                     unique_replies.append(msg)
             unique_replies.sort(key=lambda m: m.date)
 
-            # Combine raw texts
             combined = "".join([m.raw_text for m in unique_replies])
 
-            # Extract all JSON objects
             objects = extract_json_objects(combined)
             if not objects:
-                # Fallback: try to extract one from first { to last }
                 start = combined.find('{')
                 end = combined.rfind('}')
                 if start != -1 and end != -1 and end > start:
@@ -461,21 +466,13 @@ def query_bot_sync(command_text, group_type):
                 await client.delete_messages(group, [msg_id] + [m.id for m in unique_replies])
                 return {"error": "No valid JSON found"}
 
-            # Clean each object and add tags
-            cleaned_objects = []
-            for obj in objects:
-                cleaned = clean_object(obj)
-                cleaned['developer'] = DEVELOPER_TAG
-                cleaned['tag'] = DEVELOPER_TAG
-                cleaned_objects.append(cleaned)
-
-            # If only one object, return it directly; else return array
             to_delete = [msg_id] + [m.id for m in unique_replies]
             await client.delete_messages(group, to_delete)
             logger.info(f"🗑️ Deleted {len(to_delete)} messages")
-            if len(cleaned_objects) == 1:
-                return cleaned_objects[0]
-            return cleaned_objects
+            if len(objects) == 1:
+                return finalize_response(objects[0])
+            else:
+                return finalize_response(objects)
         except Exception as e:
             logger.error(f"Query error: {e}")
             return {"error": str(e)}
