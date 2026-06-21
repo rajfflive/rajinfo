@@ -30,7 +30,7 @@ GROUP_OTHER = None
 BOT_ID = None
 SPECIAL_COMMANDS = ["upiinfo", "fam", "family", "pan", "tg", "leak"]
 
-# ================= DATABASE =================
+# ================= DATABASE (unchanged) =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -77,7 +77,7 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- DB HELPERS ----------
+# ---------- DB HELPERS (unchanged) ----------
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -336,13 +336,9 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= ROBUST JSON EXTRACTION =================
-def extract_json_from_text(text):
-    """Extract all valid JSON objects and merge them."""
-    if not text:
-        return None
-
-    # Try to find a valid JSON object by balancing braces
+# ================= JSON EXTRACTION: RETURN ALL OBJECTS =================
+def extract_json_objects(text):
+    """Extract all balanced JSON objects from text and return a list."""
     objects = []
     i = 0
     while i < len(text):
@@ -365,47 +361,36 @@ def extract_json_from_text(text):
                             pass
                 j += 1
         i += 1
+    return objects
 
-    if objects:
-        # Merge all objects (later keys override earlier)
-        merged = {}
-        for obj in objects:
-            merged.update(obj)
-        return merged
-
-    # If no objects found, try to extract from first { to last }
-    start = text.find('{')
-    end = text.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        candidate = text[start:end+1]
-        try:
-            return json.loads(candidate)
-        except:
-            pass
-
-    return None
-
-def clean_response(obj):
+def clean_object(obj):
+    """Recursively replace 'tag' and 'developer' keys, and add DEVELOPER_TAG."""
     if isinstance(obj, dict):
         new_obj = {}
         for k, v in obj.items():
             if k.lower() in ('tag', 'developer'):
                 new_obj[k] = DEVELOPER_TAG
             else:
-                new_obj[k] = clean_response(v)
+                new_obj[k] = clean_object(v)
         return new_obj
     elif isinstance(obj, list):
-        return [clean_response(item) for item in obj]
+        return [clean_object(item) for item in obj]
     else:
         return obj
 
 def finalize_response(data):
+    """If data is a dict, clean and add tags. If list, clean each item."""
     if data is None:
         return None
-    cleaned = clean_response(data)
-    cleaned['developer'] = DEVELOPER_TAG
-    cleaned['tag'] = DEVELOPER_TAG
-    return cleaned
+    if isinstance(data, dict):
+        cleaned = clean_object(data)
+        cleaned['developer'] = DEVELOPER_TAG
+        cleaned['tag'] = DEVELOPER_TAG
+        return cleaned
+    elif isinstance(data, list):
+        return [finalize_response(item) for item in data]
+    else:
+        return data
 
 # ================= QUERY FUNCTION =================
 def query_bot_sync(command_text, group_type):
@@ -431,7 +416,7 @@ def query_bot_sync(command_text, group_type):
             logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.title}")
 
             bot_replies = []
-            for attempt in range(20):  # More attempts
+            for attempt in range(20):
                 await asyncio.sleep(1.5)
                 async for msg in client.iter_messages(group, limit=200):
                     if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
@@ -456,18 +441,41 @@ def query_bot_sync(command_text, group_type):
                     unique_replies.append(msg)
             unique_replies.sort(key=lambda m: m.date)
 
-            # Combine all raw texts
+            # Combine raw texts
             combined = "".join([m.raw_text for m in unique_replies])
-            data = extract_json_from_text(combined)
-            if data is None:
+
+            # Extract all JSON objects
+            objects = extract_json_objects(combined)
+            if not objects:
+                # Fallback: try to extract one from first { to last }
+                start = combined.find('{')
+                end = combined.rfind('}')
+                if start != -1 and end != -1 and end > start:
+                    try:
+                        single = json.loads(combined[start:end+1])
+                        objects = [single]
+                    except:
+                        pass
+
+            if not objects:
                 await client.delete_messages(group, [msg_id] + [m.id for m in unique_replies])
                 return {"error": "No valid JSON found"}
 
-            cleaned = finalize_response(data)
+            # Clean each object and add tags
+            cleaned_objects = []
+            for obj in objects:
+                cleaned = clean_object(obj)
+                cleaned['developer'] = DEVELOPER_TAG
+                cleaned['tag'] = DEVELOPER_TAG
+                cleaned_objects.append(cleaned)
+
+            # If only one object, return it directly; else return array
             to_delete = [msg_id] + [m.id for m in unique_replies]
             await client.delete_messages(group, to_delete)
             logger.info(f"🗑️ Deleted {len(to_delete)} messages")
-            return cleaned
+            if len(cleaned_objects) == 1:
+                return cleaned_objects[0]
+            return cleaned_objects
         except Exception as e:
             logger.error(f"Query error: {e}")
             return {"error": str(e)}
