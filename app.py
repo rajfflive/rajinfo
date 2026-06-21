@@ -13,7 +13,6 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
 from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonUrl
-from telethon.errors import RPCCallError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -439,24 +438,21 @@ def finalize_response(data):
     cleaned['tag'] = DEVELOPER_TAG
     return cleaned
 
-# ================= DADDY BOT QUERY (FIXED) =================
+# ================= DADDY BOT QUERY =================
 async def query_daddy_bot_async(client, value, daddy_bot_name):
     if value.startswith('@'):
         value = value[1:]
     sent = await client.send_message(daddy_bot_name, value)
     logger.info(f"📤 Sent plain '{value}' to {daddy_bot_name}")
 
-    # Wait for bot to respond with inline buttons
     await asyncio.sleep(3)
 
-    # Fetch recent messages from the bot
     bot_messages = []
     async for msg in client.iter_messages(daddy_bot_name, limit=20):
         bot_messages.append(msg)
     if not bot_messages:
         return {"error": "No messages from Daddy bot"}
 
-    # Find the message with inline buttons containing "Telegram"
     target_msg = None
     button_data = None
     for msg in bot_messages:
@@ -476,7 +472,6 @@ async def query_daddy_bot_async(client, value, daddy_bot_name):
         return {"error": "No 'Telegram' button found"}
 
     logger.info(f"🖱️ Clicking 'Telegram' button on message {target_msg.id}")
-    # Try to click the button; ignore errors if the bot doesn't respond to callback quickly
     try:
         await client(GetBotCallbackAnswerRequest(
             peer=daddy_bot_name,
@@ -486,19 +481,13 @@ async def query_daddy_bot_async(client, value, daddy_bot_name):
     except Exception as e:
         logger.warning(f"Callback click error (ignored): {e}")
 
-    # Wait for the final info message (the bot sends a new message with details)
-    await asyncio.sleep(5)  # give time for the bot to send the info
+    await asyncio.sleep(5)
 
-    # Fetch the latest messages from the bot (the info message)
     final_msgs = []
     async for msg in client.iter_messages(daddy_bot_name, limit=10):
-        # The info message will be from the bot and contain the ID or contacts
         if msg.sender_id == DADDY_BOT_ID and msg.id != target_msg.id and msg.id != sent.id:
-            # Check if it contains the target value or "Контактные" (contacts) as a clue
-            # We'll just take the last non-command message
             final_msgs.append(msg)
     if not final_msgs:
-        # Fallback: take the most recent message from the bot
         async for msg in client.iter_messages(daddy_bot_name, limit=1):
             if msg.sender_id == DADDY_BOT_ID:
                 final_msgs.append(msg)
@@ -506,11 +495,9 @@ async def query_daddy_bot_async(client, value, daddy_bot_name):
     if not final_msgs:
         return {"error": "No info message received after button click"}
 
-    # Combine text of all final messages (in case it's split)
     combined = "".join([m.raw_text for m in final_msgs])
     data = extract_json_from_text(combined)
     if data is None:
-        # If no JSON, return the raw text as an object
         return {"raw": combined}
     return data
 
