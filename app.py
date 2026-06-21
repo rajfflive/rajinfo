@@ -438,15 +438,17 @@ def finalize_response(data):
     cleaned['tag'] = DEVELOPER_TAG
     return cleaned
 
-# ================= DADDY BOT QUERY =================
+# ================= DADDY BOT QUERY (FIXED) =================
 async def query_daddy_bot_async(client, value, daddy_bot_name):
     if value.startswith('@'):
         value = value[1:]
     sent = await client.send_message(daddy_bot_name, value)
     logger.info(f"📤 Sent plain '{value}' to {daddy_bot_name}")
 
+    # Wait for the bot to show inline keyboard
     await asyncio.sleep(3)
 
+    # Fetch recent messages from the bot to find the "Telegram" button
     bot_messages = []
     async for msg in client.iter_messages(daddy_bot_name, limit=20):
         bot_messages.append(msg)
@@ -481,24 +483,33 @@ async def query_daddy_bot_async(client, value, daddy_bot_name):
     except Exception as e:
         logger.warning(f"Callback click error (ignored): {e}")
 
-    await asyncio.sleep(5)
+    # Wait for the info message to appear (it's a new message, not a reply)
+    await asyncio.sleep(6)
 
-    final_msgs = []
-    async for msg in client.iter_messages(daddy_bot_name, limit=10):
-        if msg.sender_id == DADDY_BOT_ID and msg.id != target_msg.id and msg.id != sent.id:
-            final_msgs.append(msg)
-    if not final_msgs:
+    # Fetch the latest messages from the bot, excluding the command and button message
+    latest_msgs = []
+    async for msg in client.iter_messages(daddy_bot_name, limit=5):
+        if msg.id != sent.id and msg.id != target_msg.id and msg.sender_id == DADDY_BOT_ID:
+            latest_msgs.append(msg)
+
+    if not latest_msgs:
+        # Fallback: take the most recent message
         async for msg in client.iter_messages(daddy_bot_name, limit=1):
             if msg.sender_id == DADDY_BOT_ID:
-                final_msgs.append(msg)
+                latest_msgs.append(msg)
 
-    if not final_msgs:
+    if not latest_msgs:
         return {"error": "No info message received after button click"}
 
-    combined = "".join([m.raw_text for m in final_msgs])
+    # Combine all messages (if multiple)
+    combined = "".join([m.raw_text for m in latest_msgs])
+    
+    # The bot's response is typically plain text, not JSON. 
+    # We'll try to extract JSON if present, else return raw text.
     data = extract_json_from_text(combined)
     if data is None:
-        return {"raw": combined}
+        # Return raw text as a JSON object
+        return {"info": combined}
     return data
 
 # ================= QUERY FUNCTION =================
