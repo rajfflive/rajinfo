@@ -438,55 +438,47 @@ def finalize_response(data):
     cleaned['tag'] = DEVELOPER_TAG
     return cleaned
 
-# ================= DADDY BOT QUERY =================
+# ================= DADDY BOT QUERY (with retry loop for button) =================
 async def query_daddy_bot_async(client, value, daddy_bot_name):
-    """Send plain value to Daddy bot and click 'Telegram' button (case-insensitive)."""
     if value.startswith('@'):
         value = value[1:]
     sent = await client.send_message(daddy_bot_name, value)
     logger.info(f"📤 Sent plain '{value}' to {daddy_bot_name}")
 
-    await asyncio.sleep(3)
-    replies = []
-    async for msg in client.iter_messages(daddy_bot_name, limit=10):
-        if msg.reply_to_msg_id == sent.id:
-            replies.append(msg)
-    if not replies:
-        return {"error": "No reply from Daddy bot"}
-
+    # Poll for the button message (retry up to 5 times, 2s interval)
     target_msg = None
     button_data = None
-    for msg in replies:
-        if msg.reply_markup:
-            for row in msg.reply_markup.rows:
-                for btn in row.buttons:
-                    # Case-insensitive check for "Telegram" in button text
-                    if "telegram" in btn.text.lower():
-                        # If it's a callback button, get data
-                        if isinstance(btn, KeyboardButtonCallback):
+    for attempt in range(6):  # 5 attempts, 2s each = 10s total
+        await asyncio.sleep(2)
+        replies = []
+        async for msg in client.iter_messages(daddy_bot_name, limit=15):
+            if msg.reply_to_msg_id == sent.id:
+                replies.append(msg)
+        if not replies:
+            continue
+        for msg in replies:
+            if msg.reply_markup:
+                for row in msg.reply_markup.rows:
+                    for btn in row.buttons:
+                        if isinstance(btn, KeyboardButtonCallback) and "telegram" in btn.text.lower():
                             target_msg = msg
                             button_data = btn.data
                             break
-                        elif isinstance(btn, KeyboardButtonUrl):
-                            # URL buttons cannot be clicked via callback; but we can try to click via another method?
-                            # Actually we can still use GetBotCallbackAnswerRequest if the button has data? No, URL buttons don't have data.
-                            # But in this bot, the Telegram button is a callback, so we ignore URL.
-                            pass
-                if button_data:
-                    break
+                    if button_data:
+                        break
             if button_data:
                 break
         if button_data:
             break
+        logger.info(f"⏳ Attempt {attempt+1}: Telegram button not found yet, retrying...")
 
     if not button_data:
-        # Fallback: try the first callback button that might be "Telegram"
+        # Fallback: click the first callback button
         for msg in replies:
             if msg.reply_markup:
                 for row in msg.reply_markup.rows:
                     for btn in row.buttons:
                         if isinstance(btn, KeyboardButtonCallback):
-                            # Click the first callback button (might be Telegram)
                             target_msg = msg
                             button_data = btn.data
                             break
@@ -496,7 +488,7 @@ async def query_daddy_bot_async(client, value, daddy_bot_name):
                 break
 
     if not button_data:
-        return {"error": "No 'Telegram' button found"}
+        return {"error": "No 'Telegram' button found after multiple attempts"}
 
     logger.info("🖱️ Clicking 'Telegram' button...")
     await client(GetBotCallbackAnswerRequest(
@@ -505,10 +497,11 @@ async def query_daddy_bot_async(client, value, daddy_bot_name):
         data=button_data
     ))
 
+    # Wait for final response (info)
     await asyncio.sleep(4)
     final_msgs = []
     async for msg in client.iter_messages(daddy_bot_name, limit=10):
-        if msg.date > target_msg.date and msg.sender_id == (await client.get_entity(daddy_bot_name)).id:
+        if msg.date > target_msg.date and msg.sender_id == DADDY_BOT_ID:
             final_msgs.append(msg)
     if not final_msgs:
         return {"error": "No info received after button click"}
