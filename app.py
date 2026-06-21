@@ -20,7 +20,7 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 PERMANENT_KEY = "felix_unlimited_2024"
 DEVELOPER_TAG = "@rajfflive"
 CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
-MAX_RESULTS = 4  # Only top 4 results
+MAX_RESULTS = 4
 
 GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
 GROUP_OTHER_NAME = "TGTOINFO"
@@ -279,7 +279,9 @@ async def start_account(account_data):
             else:
                 GROUP_OTHER = entity
             logger.info(f"✅ {var_name}: {entity.title} (ID: {entity.id})")
-        except:
+        except Exception as e:
+            logger.warning(f"⚠️ Could not get entity for {name}: {e}")
+            # fallback: find by dialog
             async for dialog in client.iter_dialogs():
                 if dialog.name == name:
                     if var_name == 'GROUP_MAIN':
@@ -293,8 +295,8 @@ async def start_account(account_data):
         bot_entity = await client.get_entity(BOT_USERNAME)
         BOT_ID = bot_entity.id
         logger.info(f"✅ Bot ID: {BOT_ID}")
-    except:
-        logger.warning(f"⚠️ Could not fetch bot {BOT_USERNAME}")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not fetch bot {BOT_USERNAME}: {e}")
 
     if GROUP_OTHER:
         try:
@@ -339,7 +341,6 @@ def init_accounts():
 
 # ================= JSON EXTRACTION (LIMITED TO MAX_RESULTS) =================
 def extract_json_objects(text, limit=MAX_RESULTS):
-    """Extract up to 'limit' balanced JSON objects from text."""
     objects = []
     i = 0
     while i < len(text) and len(objects) < limit:
@@ -379,7 +380,6 @@ def clean_object(obj):
         return obj
 
 def finalize_response(data):
-    """If data is a dict, clean and add tags. If list, clean each item and limit to MAX_RESULTS."""
     if data is None:
         return None
     if isinstance(data, dict):
@@ -401,7 +401,7 @@ def finalize_response(data):
     else:
         return data
 
-# ================= QUERY FUNCTION =================
+# ================= QUERY FUNCTION (FIXED) =================
 def query_bot_sync(command_text, group_type):
     account = get_next_account()
     if not account:
@@ -420,14 +420,15 @@ def query_bot_sync(command_text, group_type):
 
     async def do_query():
         try:
-            sent = await client.send_message(group, command_text)
+            # Use group.id to avoid "Invalid channel object"
+            sent = await client.send_message(group.id, command_text)
             msg_id = sent.id
             logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.title}")
 
             bot_replies = []
             for attempt in range(20):
                 await asyncio.sleep(1.5)
-                async for msg in client.iter_messages(group, limit=200):
+                async for msg in client.iter_messages(group.id, limit=200):
                     if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
                         bot_replies.append(msg)
                         logger.info(f"📩 Found reply (attempt {attempt+1})")
@@ -438,7 +439,7 @@ def query_bot_sync(command_text, group_type):
                     break
 
             if not bot_replies:
-                await client.delete_messages(group, [msg_id])
+                await client.delete_messages(group.id, [msg_id])
                 return {"error": "Bot did not respond"}
 
             seen = set()
@@ -463,11 +464,11 @@ def query_bot_sync(command_text, group_type):
                         pass
 
             if not objects:
-                await client.delete_messages(group, [msg_id] + [m.id for m in unique_replies])
+                await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
                 return {"error": "No valid JSON found"}
 
             to_delete = [msg_id] + [m.id for m in unique_replies]
-            await client.delete_messages(group, to_delete)
+            await client.delete_messages(group.id, to_delete)
             logger.info(f"🗑️ Deleted {len(to_delete)} messages")
             if len(objects) == 1:
                 return finalize_response(objects[0])
