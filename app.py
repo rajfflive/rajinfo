@@ -34,7 +34,7 @@ BOT_ID = None
 DADDY_BOT_ID = None
 SPECIAL_COMMANDS = ["upiinfo", "fam", "family", "pan", "tg", "leak"]
 
-# ================= DATABASE =================
+# ================= DATABASE (unchanged) =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -445,25 +445,36 @@ async def query_daddy_bot_async(client, value, daddy_bot_name):
     sent = await client.send_message(daddy_bot_name, value)
     logger.info(f"📤 Sent plain '{value}' to {daddy_bot_name}")
 
-    # Wait for the bot to show inline keyboard
+    # Wait for the bot to respond with inline keyboard
     await asyncio.sleep(3)
 
-    # Fetch recent messages from the bot to find the "Telegram" button
-    bot_messages = []
-    async for msg in client.iter_messages(daddy_bot_name, limit=20):
-        bot_messages.append(msg)
-    if not bot_messages:
-        return {"error": "No messages from Daddy bot"}
-
+    # Find the message that is a reply to our command and has a "Telegram" button
     target_msg = None
     button_data = None
-    for msg in bot_messages:
-        if msg.reply_markup:
+    async for msg in client.iter_messages(daddy_bot_name, limit=20):
+        if msg.reply_to_msg_id == sent.id and msg.reply_markup:
             for row in msg.reply_markup.rows:
                 for btn in row.buttons:
                     if isinstance(btn, KeyboardButtonCallback) and "telegram" in btn.text.lower():
                         target_msg = msg
                         button_data = btn.data
+                        break
+                if button_data:
+                    break
+            if button_data:
+                break
+
+    if not button_data:
+        # Fallback: look for any message with inline keyboard containing "Telegram" (case-insensitive)
+        async for msg in client.iter_messages(daddy_bot_name, limit=20):
+            if msg.reply_markup:
+                for row in msg.reply_markup.rows:
+                    for btn in row.buttons:
+                        if isinstance(btn, KeyboardButtonCallback) and "telegram" in btn.text.lower():
+                            target_msg = msg
+                            button_data = btn.data
+                            break
+                    if button_data:
                         break
                 if button_data:
                     break
@@ -483,32 +494,22 @@ async def query_daddy_bot_async(client, value, daddy_bot_name):
     except Exception as e:
         logger.warning(f"Callback click error (ignored): {e}")
 
-    # Wait for the info message to appear (it's a new message, not a reply)
-    await asyncio.sleep(6)
+    # Wait for the info message (the bot sends a new message with details)
+    await asyncio.sleep(5)
 
-    # Fetch the latest messages from the bot, excluding the command and button message
-    latest_msgs = []
-    async for msg in client.iter_messages(daddy_bot_name, limit=5):
-        if msg.id != sent.id and msg.id != target_msg.id and msg.sender_id == DADDY_BOT_ID:
-            latest_msgs.append(msg)
+    # Fetch recent messages from the bot, excluding the command and the button message
+    info_msgs = []
+    async for msg in client.iter_messages(daddy_bot_name, limit=10):
+        if msg.sender_id == DADDY_BOT_ID and msg.id != sent.id and msg.id != target_msg.id:
+            info_msgs.append(msg)
 
-    if not latest_msgs:
-        # Fallback: take the most recent message
-        async for msg in client.iter_messages(daddy_bot_name, limit=1):
-            if msg.sender_id == DADDY_BOT_ID:
-                latest_msgs.append(msg)
-
-    if not latest_msgs:
+    if not info_msgs:
         return {"error": "No info message received after button click"}
 
-    # Combine all messages (if multiple)
-    combined = "".join([m.raw_text for m in latest_msgs])
-    
-    # The bot's response is typically plain text, not JSON. 
-    # We'll try to extract JSON if present, else return raw text.
+    combined = "".join([m.raw_text for m in info_msgs])
     data = extract_json_from_text(combined)
     if data is None:
-        # Return raw text as a JSON object
+        # Return as raw text under "info" key
         return {"info": combined}
     return data
 
@@ -533,13 +534,15 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
                 daddy_bot = account.get('daddy_bot') or get_global_setting('daddy_bot_username') or DEFAULT_DADDY_BOT
                 return await query_daddy_bot_async(client, command_text, daddy_bot)
 
+            # Normal command: send to the group entity
             group = GROUP_MAIN if group_type == "main" else GROUP_OTHER
             if group is None:
                 return {"error": f"Group '{group_type}' not found"}
 
+            # Use the entity object directly, not group.id
             sent = await client.send_message(group, command_text)
             msg_id = sent.id
-            logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.id}")
+            logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.title}")
 
             bot_replies = []
             for attempt in range(15):
@@ -662,7 +665,7 @@ def statu_endpoint():
     add_stats("statu", "", 'error' not in result)
     return jsonify(result)
 
-# ================= ADMIN PANEL =================
+# ================= ADMIN PANEL (unchanged) =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
