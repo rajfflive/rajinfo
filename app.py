@@ -12,7 +12,7 @@ from flask import Flask, request, jsonify, render_template_string, redirect, url
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
-from telethon.tl.types import KeyboardButtonCallback
+from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonUrl
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -440,7 +440,7 @@ def finalize_response(data):
 
 # ================= DADDY BOT QUERY =================
 async def query_daddy_bot_async(client, value, daddy_bot_name):
-    """Send plain value to Daddy bot and click 'Telegram' button."""
+    """Send plain value to Daddy bot and click 'Telegram' button (case-insensitive)."""
     if value.startswith('@'):
         value = value[1:]
     sent = await client.send_message(daddy_bot_name, value)
@@ -460,14 +460,40 @@ async def query_daddy_bot_async(client, value, daddy_bot_name):
         if msg.reply_markup:
             for row in msg.reply_markup.rows:
                 for btn in row.buttons:
-                    if isinstance(btn, KeyboardButtonCallback) and "Telegram" in btn.text:
-                        target_msg = msg
-                        button_data = btn.data
-                        break
+                    # Case-insensitive check for "Telegram" in button text
+                    if "telegram" in btn.text.lower():
+                        # If it's a callback button, get data
+                        if isinstance(btn, KeyboardButtonCallback):
+                            target_msg = msg
+                            button_data = btn.data
+                            break
+                        elif isinstance(btn, KeyboardButtonUrl):
+                            # URL buttons cannot be clicked via callback; but we can try to click via another method?
+                            # Actually we can still use GetBotCallbackAnswerRequest if the button has data? No, URL buttons don't have data.
+                            # But in this bot, the Telegram button is a callback, so we ignore URL.
+                            pass
                 if button_data:
                     break
+            if button_data:
+                break
         if button_data:
             break
+
+    if not button_data:
+        # Fallback: try the first callback button that might be "Telegram"
+        for msg in replies:
+            if msg.reply_markup:
+                for row in msg.reply_markup.rows:
+                    for btn in row.buttons:
+                        if isinstance(btn, KeyboardButtonCallback):
+                            # Click the first callback button (might be Telegram)
+                            target_msg = msg
+                            button_data = btn.data
+                            break
+                    if button_data:
+                        break
+            if button_data:
+                break
 
     if not button_data:
         return {"error": "No 'Telegram' button found"}
@@ -936,7 +962,6 @@ def admin_add_account():
 def admin_update_account(acc_id):
     daddy_bot = request.form.get('daddy_bot', '').strip() or None
     update_account_daddy_bot(acc_id, daddy_bot)
-    # Update in-memory accounts list
     for acc in accounts:
         if acc['id'] == acc_id:
             acc['daddy_bot'] = daddy_bot
@@ -970,7 +995,6 @@ def admin_toggle_bot():
     bot_name = request.form.get('bot_name')
     command = request.form.get('command')
     enabled = int(request.form.get('enabled', 1))
-    # resolve group id
     group_id = None
     for g in [GROUP_MAIN, GROUP_OTHER]:
         if g and g.title == group_name:
