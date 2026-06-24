@@ -711,10 +711,13 @@ def parse_funstate_response(messages):
 
 # ================= QUERY FUNCTIONS =================
 async def query_funstate_bot_async(client, value):
-    """Send plain value to Funstate bot, collect ALL reply messages and parse them.
-    Resolves bot entity fresh per-client to avoid InvalidPeer errors with round-robin accounts."""
+    """
+    Send plain value to Funstate bot, collect ALL reply messages and parse them.
+    - Resolves bot entity fresh per-client (avoids InvalidPeer with round-robin).
+    - Uses min_id to find messages AFTER our sent message (offset_date goes backwards, don't use it).
+    - Polls every 2s for up to 20s so we return as soon as bot replies.
+    """
     try:
-        # Always resolve per-client — never use a global entity object from another session
         funstate_entity = await client.get_entity(FUNSTATE_BOT_USERNAME)
         funstate_bot_id = funstate_entity.id
     except Exception as e:
@@ -727,21 +730,25 @@ async def query_funstate_bot_async(client, value):
         logger.error(f"Send to Funstate error: {e}")
         return {"error": str(e)}
 
-    sent_time = sent.date
-    logger.info(f"📤 Sent '{value}' to Funstate bot at {sent_time}")
+    sent_id = sent.id
+    logger.info(f"📤 Sent '{value}' to Funstate (msg_id={sent_id})")
 
-    await asyncio.sleep(12)
-
+    # Poll for bot response — min_id ensures we only get messages AFTER what we sent
     all_messages = []
-    async for msg in client.iter_messages(funstate_entity, offset_date=sent_time, limit=50):
-        if msg.sender_id == funstate_bot_id and msg.date > sent_time:
-            all_messages.append(msg)
+    for attempt in range(10):           # up to 10 attempts × 2s = 20s max
+        await asyncio.sleep(2)
+        async for msg in client.iter_messages(funstate_entity, min_id=sent_id, limit=30):
+            if msg.sender_id == funstate_bot_id:
+                all_messages.append(msg)
+        if all_messages:
+            logger.info(f"📩 Got {len(all_messages)} Funstate reply(s) on attempt {attempt+1}")
+            break
+        logger.info(f"⏳ Waiting for Funstate reply... attempt {attempt+1}/10")
 
     if not all_messages:
         return {"error": "Funstate bot did not respond"}
 
     all_messages.sort(key=lambda m: m.date)
-
     parsed = parse_funstate_response(all_messages)
     return parsed
 
