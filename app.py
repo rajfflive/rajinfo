@@ -278,7 +278,7 @@ app.secret_key = secrets.token_hex(16)
 accounts = []
 account_clients = {}
 telegram_loops = {}
-account_index = 0
+account_index = -1
 
 def get_next_account():
     global account_index
@@ -286,6 +286,20 @@ def get_next_account():
         return None
     account_index = (account_index + 1) % len(accounts)
     return accounts[account_index]
+
+def get_all_active_clients():
+    """Return list of (account, client, loop) for all connected accounts, starting from next in round-robin order."""
+    if not accounts:
+        return []
+    result = []
+    start = (account_index + 1) % len(accounts)
+    ordered = accounts[start:] + accounts[:start]
+    for acc in ordered:
+        client = account_clients.get(acc['id'])
+        loop = telegram_loops.get(acc['id'])
+        if client and loop:
+            result.append((acc, client, loop))
+    return result
 
 async def start_account(account_data):
     global GROUP_MAIN, GROUP_OTHER, BOT_ID, FUNSTATE_BOT_ID, FUNSTATE_BOT_ENTITY
@@ -697,12 +711,18 @@ def parse_funstate_response(messages):
 
 # ================= QUERY FUNCTIONS =================
 async def query_funstate_bot_async(client, value):
-    """Send plain value to Funstate bot, collect ALL reply messages and parse them."""
-    if FUNSTATE_BOT_ENTITY is None:
-        return {"error": "Funstate bot entity not available"}
+    """Send plain value to Funstate bot, collect ALL reply messages and parse them.
+    Resolves bot entity fresh per-client to avoid InvalidPeer errors with round-robin accounts."""
+    try:
+        # Always resolve per-client — never use a global entity object from another session
+        funstate_entity = await client.get_entity(FUNSTATE_BOT_USERNAME)
+        funstate_bot_id = funstate_entity.id
+    except Exception as e:
+        logger.error(f"Could not resolve Funstate bot entity: {e}")
+        return {"error": f"Could not resolve Funstate bot: {e}"}
 
     try:
-        sent = await client.send_message(FUNSTATE_BOT_ENTITY, value)
+        sent = await client.send_message(funstate_entity, value)
     except Exception as e:
         logger.error(f"Send to Funstate error: {e}")
         return {"error": str(e)}
@@ -713,8 +733,8 @@ async def query_funstate_bot_async(client, value):
     await asyncio.sleep(12)
 
     all_messages = []
-    async for msg in client.iter_messages(FUNSTATE_BOT_ENTITY, offset_date=sent_time, limit=50):
-        if msg.sender_id == FUNSTATE_BOT_ID and msg.date > sent_time:
+    async for msg in client.iter_messages(funstate_entity, offset_date=sent_time, limit=50):
+        if msg.sender_id == funstate_bot_id and msg.date > sent_time:
             all_messages.append(msg)
 
     if not all_messages:
@@ -784,59 +804,83 @@ async def query_main_bot_async(client, command_text, group):
 
 # ================= MAIN QUERY FUNCTION =================
 def query_bot_sync(command_text, group_type, bot_type="main"):
-    account = get_next_account()
-    if not account:
-        return {"error": "No active Telegram accounts"}
-    acc_id = account['id']
-    client = account_clients.get(acc_id)
-    if client is None:
-        return {"error": "Account not ready"}
-    loop = telegram_loops.get(acc_id)
-    if loop is None:
-        return {"error": "Event loop not found"}
-
+    """
+    Query with round-robin across ALL active accounts.
+    If one account fails (InvalidPeer, timeout, etc.), automatically tries the next.
+    """
+    # Admin-level guards (no account needed)
     if bot_type == "funstate":
         if get_global_setting('funstate_enabled') != '1':
             return {"error": "Funstate commands are disabled by admin"}
-
-        async def do_query():
-            try:
-                return await query_funstate_bot_async(client, command_text)
-            except Exception as e:
-                logger.error(f"Funstate query error: {e}")
-                return {"error": str(e)}
     else:
-        # Check if group_main is required and enabled
-        if group_type == "main":
-            if get_global_setting('group_main_enabled') != '1':
-                return {"error": "Users X Info group (main) is disabled by admin"}
+        if group_type == "main" and get_global_setting('group_main_enabled') != '1':
+            return {"error": "Users X Info group (main) is disabled by admin"}
 
+    active_clients = get_all_active_clients()
+    if not active_clients:
+        return {"error": "No active Telegram accounts"}
+
+    group = None
+    if bot_type != "funstate":
         group = GROUP_MAIN if group_type == "main" else GROUP_OTHER
         if group is None:
-            return {"error": f"Group '{group_type}' not found / not joined"}
+            return {"error": f"Group '{group_type}' not found / not joined yet"}
 
-        async def do_query():
-            try:
-                return await query_main_bot_async(client, command_text, group)
-            except Exception as e:
-                logger.error(f"Query error: {e}")
-                return {"error": str(e)}
+    last_error = "All accounts failed"
 
-    future = asyncio.run_coroutine_threadsafe(do_query(), loop)
-    try:
-        result = future.result(timeout=60)
+    for acc, client, loop in active_clients:
+        acc_id = acc['id']
+        logger.info(f"🔄 Trying account '{acc['name']}' (ID: {acc_id}) for '{command_text[:40]}'")
+
+        if bot_type == "funstate":
+            async def do_funstate(c=client):
+                return await query_funstate_bot_async(c, command_text)
+            coro = do_funstate()
+        else:
+            async def do_main(c=client, g=group):
+                return await query_main_bot_async(c, command_text, g)
+            coro = do_main()
+
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            result = future.result(timeout=65)
+        except asyncio.TimeoutError:
+            last_error = "Request timed out"
+            logger.warning(f"⏱️ Account '{acc['name']}' timed out — trying next")
+            continue
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"⚠️ Account '{acc['name']}' exception: {e} — trying next")
+            continue
+
+        if isinstance(result, dict) and 'error' in result:
+            err_msg = result['error']
+            # Peer/session errors → try next account
+            if any(kw in err_msg for kw in ['Peer', 'peer', 'invalid', 'Invalid', 'flood', 'Flood', 'banned', 'Banned']):
+                last_error = err_msg
+                logger.warning(f"⚠️ Account '{acc['name']}' peer/flood error: {err_msg} — trying next")
+                continue
+            # Bot didn't respond → don't retry (same result on other accounts)
+            # unless it's a peer error embedded differently
+        
+        # Advance round-robin index to this account's position
+        global account_index
+        try:
+            account_index = accounts.index(acc)
+        except ValueError:
+            pass
+
         parts = command_text.split()
         cmd_name = parts[0] if parts else 'unknown'
         val_name = parts[1] if len(parts) > 1 else ''
-        success = 'error' not in result
+        success = not (isinstance(result, dict) and 'error' in result)
         add_stats(cmd_name, val_name, success)
+        update_account_last_used(acc_id)
         return result
-    except asyncio.TimeoutError:
-        add_stats('timeout', '', False)
-        return {"error": "Request timed out"}
-    except Exception as e:
-        add_stats('exception', '', False)
-        return {"error": str(e)}
+
+    # All accounts exhausted
+    add_stats('all_failed', '', False)
+    return {"error": last_error, "developer": DEVELOPER_TAG}
 
 # ================= AUTH =================
 def admin_login_required(f):
