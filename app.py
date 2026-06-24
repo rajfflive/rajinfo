@@ -20,15 +20,18 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 PERMANENT_KEY = "felix_unlimited_2024"
 DEVELOPER_TAG = "@rajfflive"
 CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
-MAX_RESULTS = 4
+MAX_RESULTS = 10
+DELETE_DELAY = 10  # seconds before deleting messages (to avoid spam)
 
 GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
 GROUP_OTHER_NAME = "TGTOINFO"
 BOT_USERNAME = "usersXinfo0bot"
+FUNSTATE_BOT_USERNAME = "Funstate_7bot"
 
 GROUP_MAIN = None
 GROUP_OTHER = None
 BOT_ID = None
+FUNSTATE_BOT_ID = None
 SPECIAL_COMMANDS = ["upiinfo", "fam", "family", "pan", "tg", "leak"]
 
 # ================= DATABASE =================
@@ -74,11 +77,31 @@ def init_db():
                   value TEXT,
                   success INTEGER,
                   timestamp TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS global_settings
+                 (key TEXT PRIMARY KEY,
+                  value TEXT)''')
+    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('vip_commands_enabled', '1')")
+    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('delete_delay', ?)", (str(DELETE_DELAY),))
     conn.commit()
     conn.close()
 init_db()
 
 # ---------- DB HELPERS ----------
+def get_global_setting(key):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT value FROM global_settings WHERE key=?", (key,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def set_global_setting(key, value):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO global_settings (key, value) VALUES (?,?)", (key, value))
+    conn.commit()
+    conn.close()
+
 def get_active_accounts():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -261,7 +284,7 @@ def get_next_account():
     return accounts[account_index]
 
 async def start_account(account_data):
-    global GROUP_MAIN, GROUP_OTHER, BOT_ID
+    global GROUP_MAIN, GROUP_OTHER, BOT_ID, FUNSTATE_BOT_ID
     acc_id = account_data['id']
     api_id = account_data['api_id']
     api_hash = account_data['api_hash']
@@ -279,9 +302,7 @@ async def start_account(account_data):
             else:
                 GROUP_OTHER = entity
             logger.info(f"✅ {var_name}: {entity.title} (ID: {entity.id})")
-        except Exception as e:
-            logger.warning(f"⚠️ Could not get entity for {name}: {e}")
-            # fallback: find by dialog
+        except:
             async for dialog in client.iter_dialogs():
                 if dialog.name == name:
                     if var_name == 'GROUP_MAIN':
@@ -295,8 +316,15 @@ async def start_account(account_data):
         bot_entity = await client.get_entity(BOT_USERNAME)
         BOT_ID = bot_entity.id
         logger.info(f"✅ Bot ID: {BOT_ID}")
-    except Exception as e:
-        logger.warning(f"⚠️ Could not fetch bot {BOT_USERNAME}: {e}")
+    except:
+        logger.warning(f"⚠️ Could not fetch bot {BOT_USERNAME}")
+
+    try:
+        funstate_entity = await client.get_entity(FUNSTATE_BOT_USERNAME)
+        FUNSTATE_BOT_ID = funstate_entity.id
+        logger.info(f"✅ Funstate Bot ID: {FUNSTATE_BOT_ID}")
+    except:
+        logger.warning(f"⚠️ Could not fetch Funstate bot {FUNSTATE_BOT_USERNAME}")
 
     if GROUP_OTHER:
         try:
@@ -307,7 +335,7 @@ async def start_account(account_data):
 
     @client.on(events.NewMessage)
     async def handler(event):
-        if event.sender_id == BOT_ID:
+        if event.sender_id == BOT_ID or event.sender_id == FUNSTATE_BOT_ID:
             logger.info(f"📩 Bot message seen: {event.raw_text[:50]}...")
 
     await client.run_until_disconnected()
@@ -339,7 +367,7 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= JSON EXTRACTION (LIMITED TO MAX_RESULTS) =================
+# ================= JSON EXTRACTION =================
 def extract_json_objects(text, limit=MAX_RESULTS):
     objects = []
     i = 0
@@ -401,8 +429,98 @@ def finalize_response(data):
     else:
         return data
 
-# ================= QUERY FUNCTION (FIXED) =================
-def query_bot_sync(command_text, group_type):
+# ================= QUERY FUNCTIONS =================
+async def query_bot_async(client, bot_id, command_text, group_id=None):
+    """Generic query to any bot in any chat."""
+    if group_id:
+        sent = await client.send_message(group_id, command_text)
+    else:
+        sent = await client.send_message(bot_id, command_text)
+    msg_id = sent.id
+    logger.info(f"📤 Sent {command_text} to bot {bot_id}")
+
+    bot_replies = []
+    for attempt in range(20):
+        await asyncio.sleep(1.5)
+        if group_id:
+            chat_id = group_id
+        else:
+            chat_id = bot_id
+        async for msg in client.iter_messages(chat_id, limit=200):
+            if msg.sender_id == bot_id and msg.reply_to_msg_id == msg_id:
+                bot_replies.append(msg)
+                logger.info(f"📩 Found reply (attempt {attempt+1})")
+            elif msg.sender_id == bot_id and command_text in msg.raw_text:
+                bot_replies.append(msg)
+                logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
+        if bot_replies:
+            break
+
+    if not bot_replies:
+        return {"error": "Bot did not respond"}
+
+    seen = set()
+    unique_replies = []
+    for msg in bot_replies:
+        if msg.id not in seen:
+            seen.add(msg.id)
+            unique_replies.append(msg)
+    unique_replies.sort(key=lambda m: m.date)
+
+    combined = "".join([m.raw_text for m in unique_replies])
+    objects = extract_json_objects(combined)
+    if not objects:
+        start = combined.find('{')
+        end = combined.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            try:
+                single = json.loads(combined[start:end+1])
+                objects = [single]
+            except:
+                pass
+    if not objects:
+        return {"info": combined}
+    return objects
+
+async def query_funstate_bot_async(client, value):
+    """Query Funstate bot with plain username/ID."""
+    sent = await client.send_message(FUNSTATE_BOT_USERNAME, value)
+    msg_id = sent.id
+    logger.info(f"📤 Sent plain '{value}' to Funstate bot")
+
+    bot_replies = []
+    for attempt in range(20):
+        await asyncio.sleep(1.5)
+        async for msg in client.iter_messages(FUNSTATE_BOT_USERNAME, limit=200):
+            if msg.sender_id == FUNSTATE_BOT_ID and msg.reply_to_msg_id == msg_id:
+                bot_replies.append(msg)
+                logger.info(f"📩 Found reply (attempt {attempt+1})")
+            elif msg.sender_id == FUNSTATE_BOT_ID and value in msg.raw_text:
+                bot_replies.append(msg)
+                logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
+        if bot_replies:
+            break
+
+    if not bot_replies:
+        return {"error": "Funstate bot did not respond"}
+
+    seen = set()
+    unique_replies = []
+    for msg in bot_replies:
+        if msg.id not in seen:
+            seen.add(msg.id)
+            unique_replies.append(msg)
+    unique_replies.sort(key=lambda m: m.date)
+
+    combined = "".join([m.raw_text for m in unique_replies])
+    objects = extract_json_objects(combined)
+    if objects:
+        return objects
+    else:
+        return {"info": combined}
+
+# ================= MAIN QUERY FUNCTION =================
+def query_bot_sync(command_text, group_type, bot_type="main"):
     account = get_next_account()
     if not account:
         return {"error": "No active Telegram accounts"}
@@ -414,69 +532,26 @@ def query_bot_sync(command_text, group_type):
     if loop is None:
         return {"error": "Event loop not found"}
 
-    group = GROUP_MAIN if group_type == "main" else GROUP_OTHER
-    if group is None:
-        return {"error": f"Group '{group_type}' not found"}
+    if bot_type == "funstate":
+        async def do_query():
+            try:
+                if get_global_setting('vip_commands_enabled') != '1':
+                    return {"error": "VIP commands are currently disabled by admin"}
+                return await query_funstate_bot_async(client, command_text)
+            except Exception as e:
+                logger.error(f"Funstate query error: {e}")
+                return {"error": str(e)}
+    else:
+        group = GROUP_MAIN if group_type == "main" else GROUP_OTHER
+        if group is None:
+            return {"error": f"Group '{group_type}' not found"}
 
-    async def do_query():
-        try:
-            # Use group.id to avoid "Invalid channel object"
-            sent = await client.send_message(group.id, command_text)
-            msg_id = sent.id
-            logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.title}")
-
-            bot_replies = []
-            for attempt in range(20):
-                await asyncio.sleep(1.5)
-                async for msg in client.iter_messages(group.id, limit=200):
-                    if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
-                        bot_replies.append(msg)
-                        logger.info(f"📩 Found reply (attempt {attempt+1})")
-                    elif msg.sender_id == BOT_ID and command_text.split()[1] in msg.raw_text:
-                        bot_replies.append(msg)
-                        logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
-                if bot_replies:
-                    break
-
-            if not bot_replies:
-                await client.delete_messages(group.id, [msg_id])
-                return {"error": "Bot did not respond"}
-
-            seen = set()
-            unique_replies = []
-            for msg in bot_replies:
-                if msg.id not in seen:
-                    seen.add(msg.id)
-                    unique_replies.append(msg)
-            unique_replies.sort(key=lambda m: m.date)
-
-            combined = "".join([m.raw_text for m in unique_replies])
-
-            objects = extract_json_objects(combined)
-            if not objects:
-                start = combined.find('{')
-                end = combined.rfind('}')
-                if start != -1 and end != -1 and end > start:
-                    try:
-                        single = json.loads(combined[start:end+1])
-                        objects = [single]
-                    except:
-                        pass
-
-            if not objects:
-                await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
-                return {"error": "No valid JSON found"}
-
-            to_delete = [msg_id] + [m.id for m in unique_replies]
-            await client.delete_messages(group.id, to_delete)
-            logger.info(f"🗑️ Deleted {len(to_delete)} messages")
-            if len(objects) == 1:
-                return finalize_response(objects[0])
-            else:
-                return finalize_response(objects)
-        except Exception as e:
-            logger.error(f"Query error: {e}")
-            return {"error": str(e)}
+        async def do_query():
+            try:
+                return await query_bot_async(client, BOT_ID, command_text, group.id)
+            except Exception as e:
+                logger.error(f"Query error: {e}")
+                return {"error": str(e)}
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
@@ -522,7 +597,7 @@ def require_api_key(f):
     return decorated
 
 # ================= API ENDPOINTS =================
-ALL_COMMANDS = ["num", "veh", "vnum", "upiinfo", "fam", "insta", "ip", "email", "tg", "ifsc", "adhar", "imei", "pak", "family", "gst", "bomber", "pan", "leak"]
+ALL_COMMANDS = ["num", "veh", "vnum", "upiinfo", "fam", "insta", "ip", "email", "tg", "ifsc", "adhar", "imei", "pak", "family", "gst", "bomber", "pan", "leak", "funstate", "names"]
 
 for cmd in ALL_COMMANDS:
     def make_endpoint(cmd):
@@ -535,13 +610,20 @@ for cmd in ALL_COMMANDS:
                 add_stats(cmd, value, True)
                 return jsonify(cached)
 
-            group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
-            result = query_bot_sync(f"/{cmd} {value}", group_type)
-            result = finalize_response(result)
-            if "error" not in result:
-                set_cache(cmd, value, result)
-            log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
-            return jsonify(result)
+            if cmd in ("funstate", "names"):
+                # Both use the same funstate bot query
+                result = query_bot_sync(value, None, bot_type="funstate")
+            else:
+                group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
+                result = query_bot_sync(f"/{cmd} {value}", group_type)
+            if isinstance(result, list):
+                finalized = [finalize_response(item) for item in result]
+            else:
+                finalized = finalize_response(result)
+            if "error" not in finalized:
+                set_cache(cmd, value, finalized)
+            log_usage(request.api_key, cmd, value, json.dumps(finalized), 'error' not in finalized, None)
+            return jsonify(finalized)
         return endpoint
     app.add_url_rule(f'/{cmd}/<value>', f'api_{cmd}', make_endpoint(cmd), methods=['GET'])
 
@@ -586,6 +668,7 @@ ADMIN_HTML = """
         <div class="tab" onclick="showTab('accounts')">Accounts</div>
         <div class="tab" onclick="showTab('logs')">Usage Logs</div>
         <div class="tab" onclick="showTab('status')">Status</div>
+        <div class="tab" onclick="showTab('settings')">Settings</div>
         <div style="margin-left:auto;"><a href="/admin/logout" style="color:red;">Logout</a></div>
     </div>
     <div id="keys" class="panel">
@@ -669,11 +752,31 @@ ADMIN_HTML = """
         <p><strong>Main Group (Special):</strong> {{ group_main_name }}</p>
         <p><strong>Other Group:</strong> {{ group_other_name }}</p>
         <p><strong>Bot ID:</strong> {{ bot_id or 'Not fetched' }}</p>
+        <p><strong>Funstate Bot ID:</strong> {{ funstate_bot_id or 'Not fetched' }}</p>
         <hr>
         <h3>API Stats</h3>
         <p><strong>Total Requests:</strong> {{ stats.total }}</p>
         <p><strong>✅ Success:</strong> {{ stats.success }}</p>
         <p><strong>❌ Failed:</strong> {{ stats.fail }}</p>
+    </div>
+    <div id="settings" class="panel" style="display:none;">
+        <h2>Settings</h2>
+        <h3>VIP Commands</h3>
+        <form method="POST" action="/admin/toggle_vip">
+            <label>Enable VIP Commands (Funstate bot):</label>
+            <select name="vip_enabled">
+                <option value="1" {% if vip_enabled == '1' %}selected{% endif %}>ON</option>
+                <option value="0" {% if vip_enabled == '0' %}selected{% endif %}>OFF</option>
+            </select>
+            <button type="submit" class="success">Update</button>
+        </form>
+        <hr>
+        <h3>Delete Delay (seconds)</h3>
+        <p>Current delay: {{ delete_delay }}s</p>
+        <form method="POST" action="/admin/set_delete_delay">
+            <input type="number" name="delete_delay" value="{{ delete_delay }}" min="5" max="60">
+            <button type="submit" class="success">Update</button>
+        </form>
     </div>
 </div>
 <script>
@@ -709,6 +812,8 @@ def admin_dashboard():
     logs = get_usage_logs(100)
     total, success, fail = get_stats()
     stats = {"total": total, "success": success, "fail": fail}
+    vip_enabled = get_global_setting('vip_commands_enabled') or '1'
+    delete_delay = get_global_setting('delete_delay') or str(DELETE_DELAY)
     return render_template_string(ADMIN_HTML,
                                  keys=keys,
                                  accounts=accounts,
@@ -719,7 +824,24 @@ def admin_dashboard():
                                  group_main_name=GROUP_MAIN_NAME,
                                  group_other_name=GROUP_OTHER_NAME,
                                  bot_id=BOT_ID,
-                                 stats=stats)
+                                 funstate_bot_id=FUNSTATE_BOT_ID,
+                                 stats=stats,
+                                 vip_enabled=vip_enabled,
+                                 delete_delay=delete_delay)
+
+@app.route('/admin/toggle_vip', methods=['POST'])
+@admin_login_required
+def admin_toggle_vip():
+    enabled = request.form.get('vip_enabled', '1')
+    set_global_setting('vip_commands_enabled', enabled)
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/set_delete_delay', methods=['POST'])
+@admin_login_required
+def admin_set_delete_delay():
+    delay = request.form.get('delete_delay', str(DELETE_DELAY))
+    set_global_setting('delete_delay', delay)
+    return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/clear_cache')
 @admin_login_required
