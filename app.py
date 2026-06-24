@@ -444,33 +444,32 @@ def parse_funstate_response(text):
     all_urls = re.findall(url_pattern, text)
     links = [url for url in all_urls if url.strip()]
     
-    # Also extract any t.me links that might be without protocol? They usually have protocol.
-    # Additional extraction for @mentions (though they are not clickable links, we treat as links)
+    # Also extract @mentions
     mentions = re.findall(r'@[a-zA-Z0-9_]+', text)
     for m in mentions:
         if m not in links:
             links.append(m)
-    # Remove duplicates
     links = list(set(links))
     
-    # Separate sticker pack link and channel link
+    # Separate sticker pack links and channel link
     sticker_links = []
     channel_link = None
     for link in links:
         if 'addstickers' in link or 't.me/addstickers' in link:
             sticker_links.append(link)
         elif 't.me/Funstate_7bot?start=' in link:
-            # This is the bot's start link, ignore for sticker pack
+            # ignore
             pass
         else:
-            # If it's a t.me/username link and not addstickers, might be channel
             if link.startswith('https://t.me/') and 'addstickers' not in link:
-                # Could be channel link
                 channel_link = link
-    # Also check if there is a channel name that might have a link later
-    # We'll also look for a line like "Chαηη℮l: name" but we don't have the link, so we keep the extracted
+    # Also look for sticker pack links in the text using regex (in case they appear without protocol)
+    sticker_urls = re.findall(r't\.me/addstickers/[^\s]+', text)
+    for su in sticker_urls:
+        if su not in sticker_links:
+            sticker_links.append(su)
     
-    # Filter out the Funstate_7bot start link from links (keep for raw but not in sticker links)
+    # Clean links: remove duplicates and filter out Funstate start links
     links = [l for l in links if 'Funstate_7bot?start=' not in l]
     
     result['links'] = links
@@ -488,13 +487,10 @@ def parse_funstate_response(text):
     usernames_match = re.search(r'usеrnamеѕ:\s*.*?\n\s*\|?\s*(.*?)(?:\n|$)', text, re.DOTALL)
     if usernames_match:
         usernames_raw = usernames_match.group(1)
-        # Split by | or spaces? Usually they are like | @user1 | @user2
-        # But also may be just spaces.
         usernames = re.findall(r'@[a-zA-Z0-9_]+', usernames_raw)
         if usernames:
             result['usernames'] = list(set(usernames))
         else:
-            # fallback: split by | and clean
             parts = [p.strip() for p in usernames_raw.split('|') if p.strip()]
             result['usernames'] = [p for p in parts if p.startswith('@')]
 
@@ -529,7 +525,7 @@ def parse_funstate_response(text):
     if replies_match:
         stats['replies_percent'] = replies_match.group(1)
         stats['media_percent'] = replies_match.group(2)
-    circles_match = re.search(r'Cirсłеѕ:\s*(\d+),\s+voice:\s*(\d+)', text)
+    circles_match = re.search(r'Cirсłeѕ:\s*(\d+),\s+voice:\s*(\d+)', text)
     if circles_match:
         stats['circles'] = int(circles_match.group(1))
         stats['voice'] = int(circles_match.group(2))
@@ -542,10 +538,9 @@ def parse_funstate_response(text):
     sticker_match = re.search(r'Sτiсkerѕеτѕ:\s*(\d+)\s*\[Viеw\]', text)
     if sticker_match:
         stats['stickersets'] = int(sticker_match.group(1))
-    # Also check for "Кηоwn ѕtiсқ℮rѕеτs" – this might contain the link
+    # Also check for "Кηоwn ѕtiсқ℮rѕеτs" section
     known_stickers = re.search(r'Кηоwn ѕtiсқ℮rѕеτs сreated by .*?:\s*(.*?)(?:\n|$)', text, re.DOTALL)
     if known_stickers:
-        # Extract links from that section
         sticker_text = known_stickers.group(1)
         sticker_urls = re.findall(r'https?://[^\s]+', sticker_text)
         if sticker_urls:
@@ -562,7 +557,7 @@ def parse_funstate_response(text):
 
 # ================= QUERY FUNCTIONS =================
 async def query_funstate_bot_async(client, value):
-    """Send plain value directly to Funstate bot, capture and parse its reply."""
+    """Send plain value directly to Funstate bot, capture and parse its full reply."""
     if FUNSTATE_BOT_ENTITY is None:
         return {"error": "Funstate bot entity not available"}
     try:
@@ -573,20 +568,28 @@ async def query_funstate_bot_async(client, value):
     sent_time = sent.date
     logger.info(f"📤 Sent plain '{value}' to Funstate bot at {sent_time}")
 
-    bot_replies = []
-    for attempt in range(25):
+    # Poll for messages until we have a complete response
+    all_messages = []
+    for attempt in range(30):  # up to 30 attempts
         await asyncio.sleep(1.5)
-        async for msg in client.iter_messages(FUNSTATE_BOT_ENTITY, limit=100):
+        # Fetch messages after sent_time
+        async for msg in client.iter_messages(FUNSTATE_BOT_ENTITY, offset_date=sent_time, limit=30):
             if msg.sender_id == FUNSTATE_BOT_ID and msg.date > sent_time:
-                bot_replies.append(msg)
-        if bot_replies:
+                # Avoid duplicates
+                if msg.id not in [m.id for m in all_messages]:
+                    all_messages.append(msg)
+        # Check if we have a complete response (contains "ID:" or "usernames:")
+        combined = "".join([m.raw_text for m in all_messages])
+        if "IＤ:" in combined or "usеrnamеѕ:" in combined:
+            logger.info(f"Complete response found after {attempt+1} attempts")
             break
 
-    if not bot_replies:
+    if not all_messages:
         return {"error": "Funstate bot did not respond"}
 
-    bot_replies.sort(key=lambda m: m.date)
-    combined = "".join([m.raw_text for m in bot_replies])
+    # Sort by date
+    all_messages.sort(key=lambda m: m.date)
+    combined = "".join([m.raw_text for m in all_messages])
     
     parsed = parse_funstate_response(combined)
     return parsed
@@ -685,7 +688,7 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
-        result = future.result(timeout=50)
+        result = future.result(timeout=60)
         success = 'error' not in result
         add_stats(command_text.split()[0] if command_text else 'unknown', command_text.split()[1] if len(command_text.split()) > 1 else '', success)
         return result
@@ -751,7 +754,6 @@ for cmd in ALL_COMMANDS:
                 result = query_bot_sync(f"/{cmd} {value}", group_type)
             
             if cmd in ("funstate", "names"):
-                # Already parsed
                 if isinstance(result, dict):
                     result['developer'] = DEVELOPER_TAG
                     result['tag'] = DEVELOPER_TAG
@@ -780,7 +782,7 @@ def statu_endpoint():
     add_stats("statu", "", 'error' not in result)
     return jsonify(result)
 
-# ================= ADMIN PANEL (unchanged) =================
+# ================= ADMIN PANEL =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
