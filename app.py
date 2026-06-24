@@ -86,6 +86,7 @@ def init_db():
     c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('funstate_enabled', '1')")
     c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('group_main_enabled', '1')")
     c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('delete_delay', '10')")
+    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('public_key', '')")
     conn.commit()
     conn.close()
 init_db()
@@ -582,13 +583,18 @@ def parse_funstate_response(messages):
     """
     result = {}
     raw_text_parts = []
-    channel_link = None
+    bio_link = None
 
     for msg in messages:
         raw_text_parts.append(msg.raw_text or "")
 
     combined_raw = "\n".join(raw_text_parts)
     combined_norm = normalize_text(combined_raw)
+
+    # ---- Display name ("This is NAME") ----
+    name_match = re.search(r'this\s+is\s+(.+?)(?:\n|$)', combined_norm, re.IGNORECASE)
+    if name_match:
+        result['name'] = name_match.group(1).strip()
 
     # ---- Collect and classify URLs ----
     seen_urls = set()
@@ -626,15 +632,15 @@ def parse_funstate_response(messages):
             elif is_tme:
                 tme_links.append(url)
 
-    # ---- Channel link detection ----
+    # ---- Bio link detection (channel/bio link from buttons or text) ----
     for url, label in button_urls:
         norm_label = normalize_text(label).lower()
         if 'channel' in norm_label or 'chan' in norm_label:
             if 'addstickers' not in url:
-                channel_link = url
+                bio_link = url
                 break
 
-    if not channel_link:
+    if not bio_link:
         for line in combined_norm.split('\n'):
             line_norm = line.lower()
             if re.search(r'ch[a@][nn][e][l]', line_norm) or 'channel' in line_norm:
@@ -644,21 +650,21 @@ def parse_funstate_response(messages):
                     if not u.startswith('http'):
                         u = 'https://' + u
                     if 'addstickers' not in u:
-                        channel_link = u
+                        bio_link = u
                         break
                 at_in_line = re.findall(r'@[a-zA-Z0-9_]+', line)
                 if at_in_line:
-                    channel_link = 'https://t.me/' + at_in_line[0].lstrip('@')
+                    bio_link = 'https://t.me/' + at_in_line[0].lstrip('@')
                     break
 
-    if not channel_link:
+    if not bio_link:
         for url, label in button_urls:
             if 'addstickers' not in url and 't.me/' in url:
-                channel_link = url
+                bio_link = url
                 break
 
-    if not channel_link and tme_links:
-        channel_link = tme_links[0]
+    if not bio_link and tme_links:
+        bio_link = tme_links[0]
 
     # ---- ID extraction ----
     id_match = re.search(r'(?:ID|iD)[:\s]*(\d{5,})', combined_norm, re.IGNORECASE)
@@ -747,12 +753,12 @@ def parse_funstate_response(messages):
             colon_idx = line.find(':')
             if colon_idx != -1:
                 channel_name_raw = line[colon_idx + 1:].strip()
-                if channel_name_raw:
-                    result['channel_name'] = channel_name_raw
+                if channel_name_raw and 'SET UP' not in channel_name_raw.upper():
+                    result['channel'] = channel_name_raw
                     break
 
-    if channel_link:
-        result['channel_link'] = channel_link
+    if bio_link:
+        result['bio_link'] = bio_link
 
     # NOTE: 'raw', 'all_links', and 'sticker_pack_links' intentionally omitted
     return result
@@ -778,16 +784,27 @@ async def query_funstate_bot_async(client, value):
     sent_id = sent.id
     logger.info(f"📤 Sent '{value}' to Funstate (msg_id={sent_id})")
 
+    # Initial delay — bot sometimes takes 3-5s to process IDs
+    await asyncio.sleep(4)
+
     all_messages = []
-    for attempt in range(10):
-        await asyncio.sleep(2)
+    seen_ids = set()
+    for attempt in range(15):          # 15 attempts × 3s = 45s max
         async for msg in client.iter_messages(funstate_entity, min_id=sent_id, limit=30):
-            if msg.sender_id == funstate_bot_id:
+            if msg.sender_id == funstate_bot_id and msg.id not in seen_ids:
                 all_messages.append(msg)
+                seen_ids.add(msg.id)
         if all_messages:
             logger.info(f"📩 Got {len(all_messages)} Funstate reply(s) on attempt {attempt+1}")
+            # Wait 3 more seconds to catch any additional messages bot might send
+            await asyncio.sleep(3)
+            async for msg in client.iter_messages(funstate_entity, min_id=sent_id, limit=30):
+                if msg.sender_id == funstate_bot_id and msg.id not in seen_ids:
+                    all_messages.append(msg)
+                    seen_ids.add(msg.id)
             break
-        logger.info(f"⏳ Waiting for Funstate reply... attempt {attempt+1}/10")
+        logger.info(f"⏳ Waiting for Funstate reply... attempt {attempt+1}/15")
+        await asyncio.sleep(3)
 
     if not all_messages:
         return {"error": "Funstate bot did not respond"}
@@ -1059,6 +1076,19 @@ ADMIN_HTML = """
         .badge-blue { background: #0c2a4a; color: #38bdf8; }
         .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #334155; }
         .toggle-row:last-child { border-bottom: none; }
+        .log-row { cursor: pointer; }
+        .log-row:hover td { background: #1e3a5f55 !important; }
+        .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:999; align-items:center; justify-content:center; }
+        .modal-overlay.open { display:flex; }
+        .modal-box { background:#1e293b; border:1px solid #334155; border-radius:14px; padding:24px; width:90%; max-width:760px; max-height:85vh; display:flex; flex-direction:column; }
+        .modal-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
+        .modal-title { font-size:16px; font-weight:600; color:#f1f5f9; }
+        .modal-close { background:none; border:none; color:#94a3b8; font-size:22px; cursor:pointer; line-height:1; }
+        .modal-close:hover { color:#f1f5f9; }
+        .modal-body { overflow-y:auto; flex:1; }
+        .modal-meta { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px; font-size:12px; color:#64748b; }
+        .modal-meta span { background:#0f172a; padding:3px 8px; border-radius:6px; border:1px solid #334155; }
+        pre.json-view { background:#0f172a; border:1px solid #334155; border-radius:8px; padding:14px; font-size:12px; color:#a5f3fc; white-space:pre-wrap; word-break:break-all; margin:0; }
         .toggle-label { font-size: 14px; color: #cbd5e1; }
         .toggle-desc { font-size: 12px; color: #64748b; margin-top: 2px; }
         .switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; }
@@ -1316,6 +1346,14 @@ ADMIN_HTML = """
                     <span style="color:#64748b;font-size:13px;">seconds</span>
                 </div>
             </div>
+            <div class="card">
+                <h2>Public Search Panel</h2>
+                <p style="font-size:13px;color:#64748b;margin-bottom:12px;">API key used by the public search page at <code>/search</code>. Leave blank to disable public search.</p>
+                <div style="display:flex;gap:10px;align-items:center;">
+                    <input type="text" name="public_key" value="{{ public_key }}" placeholder="Paste an API key or leave blank" style="margin:0;flex:1;">
+                    <a href="/search" target="_blank" class="btn btn-primary" style="white-space:nowrap;">Open Search →</a>
+                </div>
+            </div>
             <button type="submit" class="btn btn-primary" style="margin-top:4px;">Save All Settings</button>
         </form>
     </div>
@@ -1327,7 +1365,13 @@ ADMIN_HTML = """
             <table>
                 <tr><th>Time</th><th>Key</th><th>Command</th><th>Value</th><th>Response</th><th>Status</th></tr>
                 {% for log in logs %}
-                <tr>
+                <tr class="log-row" onclick="openLog(this)"
+                    data-time="{{ log.timestamp[:19].replace('T',' ') }}"
+                    data-key="{{ log.key }}"
+                    data-cmd="{{ log.command }}"
+                    data-val="{{ log.value }}"
+                    data-resp="{{ log.response | replace('"', '&quot;') }}"
+                    data-ok="{{ '1' if log.success else '0' }}">
                     <td style="color:#64748b;font-size:12px;">{{ log.timestamp[:19].replace('T',' ') }}</td>
                     <td><code>{{ log.key[:8] }}…</code></td>
                     <td><code>{{ log.command }}</code></td>
@@ -1337,6 +1381,21 @@ ADMIN_HTML = """
                 </tr>
                 {% endfor %}
             </table>
+            <p style="font-size:12px;color:#475569;margin-top:10px;">💡 Click any row to view full response</p>
+        </div>
+    </div>
+</div>
+
+<!-- Log Detail Modal -->
+<div class="modal-overlay" id="logModal" onclick="if(event.target===this)closeLog()">
+    <div class="modal-box">
+        <div class="modal-header">
+            <span class="modal-title">Log Detail</span>
+            <button class="modal-close" onclick="closeLog()">×</button>
+        </div>
+        <div class="modal-body">
+            <div class="modal-meta" id="modalMeta"></div>
+            <pre class="json-view" id="modalResp"></pre>
         </div>
     </div>
 </div>
@@ -1352,6 +1411,25 @@ function showTab(tab) {
     });
     document.getElementById('page-title').textContent = titles[tab] || tab;
 }
+function openLog(row) {
+    const time = row.dataset.time;
+    const key = row.dataset.key;
+    const cmd = row.dataset.cmd;
+    const val = row.dataset.val;
+    const resp = row.dataset.resp;
+    const ok = row.dataset.ok === '1';
+    document.getElementById('modalMeta').innerHTML =
+        `<span>🕐 ${time}</span><span>🔑 ${key.slice(0,12)}…</span><span>📌 /${cmd}</span><span>🔍 ${val || '—'}</span><span class="${ok?'':''}">` +
+        (ok ? '✅ Success' : '❌ Failed') + '</span>';
+    let pretty = resp;
+    try { pretty = JSON.stringify(JSON.parse(resp), null, 2); } catch(e) {}
+    document.getElementById('modalResp').textContent = pretty;
+    document.getElementById('logModal').classList.add('open');
+}
+function closeLog() {
+    document.getElementById('logModal').classList.remove('open');
+}
+document.addEventListener('keydown', e => { if(e.key==='Escape') closeLog(); });
 </script>
 </body>
 </html>
@@ -1413,6 +1491,7 @@ def admin_dashboard():
     funstate_enabled = get_global_setting('funstate_enabled') or '1'
     group_main_enabled = get_global_setting('group_main_enabled') or '1'
     delete_delay = get_global_setting('delete_delay') or '10'
+    public_key = get_global_setting('public_key') or ''
     return render_template_string(ADMIN_HTML,
                                  keys=keys,
                                  accounts=accs,
@@ -1429,7 +1508,8 @@ def admin_dashboard():
                                  cmd_status=cmd_status,
                                  funstate_enabled=funstate_enabled,
                                  group_main_enabled=group_main_enabled,
-                                 delete_delay=delete_delay)
+                                 delete_delay=delete_delay,
+                                 public_key=public_key)
 
 @app.route('/admin/toggle_command', methods=['POST'])
 @admin_login_required
@@ -1443,6 +1523,8 @@ def admin_toggle_command():
     set_global_setting('group_main_enabled', group_main_val)
     delete_delay = request.form.get('delete_delay', '10')
     set_global_setting('delete_delay', delete_delay)
+    public_key_val = request.form.get('public_key', '').strip()
+    set_global_setting('public_key', public_key_val)
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/clear_cache')
@@ -1524,6 +1606,136 @@ def admin_delete_account(acc_id):
 def admin_logout():
     session.pop('admin_logged_in', None)
     return redirect(url_for('admin_login'))
+
+@app.route('/search')
+def public_search():
+    pub_key = get_global_setting('public_key') or ''
+    if not pub_key:
+        return '<h2 style="font-family:sans-serif;text-align:center;margin-top:80px;color:#ef4444;">Public search is disabled. Admin needs to configure a public key first.</h2>', 403
+    return render_template_string(PUBLIC_SEARCH_HTML, pub_key=pub_key)
+
+PUBLIC_SEARCH_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Felix API — Search</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:40px 16px;}
+h1{color:#38bdf8;font-size:28px;font-weight:700;margin-bottom:6px;}
+.sub{color:#64748b;font-size:13px;margin-bottom:32px;}
+.search-box{display:flex;gap:10px;width:100%;max-width:540px;margin-bottom:30px;}
+input[type=text]{flex:1;padding:12px 16px;background:#1e293b;border:1px solid #334155;border-radius:10px;color:#e2e8f0;font-size:15px;outline:none;transition:border .15s;}
+input[type=text]:focus{border-color:#38bdf8;}
+button{padding:12px 22px;background:#0ea5e9;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .15s;}
+button:hover{opacity:.85;}
+#result{width:100%;max-width:540px;}
+.card{background:#1e293b;border:1px solid #334155;border-radius:14px;padding:22px;margin-bottom:16px;}
+.label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;}
+.value{font-size:15px;color:#f1f5f9;font-weight:500;}
+.value a{color:#38bdf8;text-decoration:none;}
+.value a:hover{text-decoration:underline;}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600;background:#0c2a4a;color:#38bdf8;margin:2px 2px 0 0;}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:4px;}
+.stat-item{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px 12px;}
+.stat-num{font-size:20px;font-weight:700;color:#f1f5f9;}
+.stat-lbl{font-size:11px;color:#64748b;margin-top:2px;}
+.history-item{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid #1e293b;align-items:flex-start;}
+.history-item:last-child{border-bottom:none;}
+.hist-date{font-size:11px;color:#64748b;white-space:nowrap;margin-top:2px;min-width:78px;}
+.hist-name{font-size:14px;color:#e2e8f0;}
+.spinner{text-align:center;padding:30px;color:#64748b;}
+.error-box{background:#450a0a;border:1px solid #7f1d1d;border-radius:10px;padding:16px;color:#fca5a5;text-align:center;}
+.section-title{font-size:13px;font-weight:600;color:#94a3b8;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #334155;}
+</style>
+</head>
+<body>
+<h1>🔍 Felix Search</h1>
+<p class="sub">Search Telegram user info — powered by @rajfflive</p>
+<div class="search-box">
+  <input type="text" id="q" placeholder="Enter username or user ID…" onkeydown="if(event.key==='Enter')search()">
+  <button onclick="search()">Search</button>
+</div>
+<div id="result"></div>
+<script>
+const PUB_KEY = "{{ pub_key }}";
+async function search() {
+  const q = document.getElementById('q').value.trim();
+  if (!q) return;
+  const out = document.getElementById('result');
+  out.innerHTML = '<div class="spinner">⏳ Searching… this may take up to 30 seconds</div>';
+  try {
+    const res = await fetch(`/funstate/${encodeURIComponent(q)}?api_key=${PUB_KEY}`);
+    const data = await res.json();
+    if (data.error) { out.innerHTML = `<div class="error-box">❌ ${data.error}</div>`; return; }
+    out.innerHTML = renderResult(data);
+  } catch(e) {
+    out.innerHTML = `<div class="error-box">❌ Network error: ${e.message}</div>`;
+  }
+}
+function renderResult(d) {
+  let html = '';
+
+  // Identity card
+  html += '<div class="card">';
+  html += '<div class="section-title">👤 Identity</div>';
+  if (d.name) html += row('Display Name', escHtml(d.name));
+  if (d.id) html += row('User ID', `<code style="color:#38bdf8">${escHtml(d.id)}</code>`);
+  if (d.usernames && d.usernames.length) {
+    const badges = d.usernames.map(u => `<span class="badge">${escHtml(u)}</span>`).join('');
+    html += row('Usernames', badges);
+  }
+  if (d.channel) html += row('Channel', escHtml(d.channel));
+  if (d.bio_link) html += row('Bio Link', `<a href="${escHtml(d.bio_link)}" target="_blank">${escHtml(d.bio_link)}</a>`);
+  html += '</div>';
+
+  // Stats card
+  if (d.stats && Object.keys(d.stats).length) {
+    const s = d.stats;
+    html += '<div class="card">';
+    html += '<div class="section-title">📊 Activity Stats</div>';
+    html += '<div class="stat-grid">';
+    if (s.total_messages !== undefined) html += statBox(s.total_messages, 'Messages');
+    if (s.total_groups !== undefined) html += statBox(s.total_groups, 'Groups');
+    if (s.replies_percent) html += statBox(s.replies_percent, 'Replies');
+    if (s.media_percent) html += statBox(s.media_percent, 'Media');
+    if (s.circles !== undefined) html += statBox(s.circles, 'Circles');
+    if (s.voice !== undefined) html += statBox(s.voice, 'Voice Msgs');
+    if (s.admin_in_groups !== undefined) html += statBox(s.admin_in_groups, 'Admin In');
+    if (s.were_looking_for !== undefined) html += statBox(s.were_looking_for, 'Looking For');
+    if (s.stickersets_count !== undefined) html += statBox(s.stickersets_count, 'Sticker Sets');
+    html += '</div>';
+    if (s.message_diversity) html += `<div style="margin-top:12px;">${row('Diversity', s.message_diversity)}</div>`;
+    if (s.from_date && s.to_date) html += row('Active Period', `${s.from_date} → ${s.to_date}`);
+    if (s.favorite_group) html += row('Favorite Group', escHtml(s.favorite_group));
+    html += '</div>';
+  }
+
+  // Name history
+  if (d.name_history && d.name_history.length) {
+    html += '<div class="card">';
+    html += '<div class="section-title">📝 Name History</div>';
+    d.name_history.forEach(h => {
+      html += `<div class="history-item"><span class="hist-date">${escHtml(h.date)}</span><span class="hist-name">→ ${escHtml(h.name)}</span></div>`;
+    });
+    html += '</div>';
+  }
+
+  return html;
+}
+function row(label, val) {
+  return `<div style="margin-bottom:10px;"><div class="label">${label}</div><div class="value">${val}</div></div>`;
+}
+function statBox(val, lbl) {
+  return `<div class="stat-item"><div class="stat-num">${val}</div><div class="stat-lbl">${lbl}</div></div>`;
+}
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+</body>
+</html>"""
 
 @app.route('/')
 def home():
