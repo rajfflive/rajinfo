@@ -497,6 +497,11 @@ def normalize_text(text):
         'ᴍ': 'm', 'ɴ': 'n', 'ᴏ': 'o', 'ᴘ': 'p', 'ǫ': 'q', 'ʀ': 'r',
         'ꜱ': 's', 'ᴛ': 't', 'ᴜ': 'u', 'ᴠ': 'v', 'ᴡ': 'w', 'x': 'x',
         'ʏ': 'y', 'ᴢ': 'z',
+        # Roman numeral lookalikes used in bot text
+        'ⅼ': 'l', 'ⅽ': 'c', 'ⅾ': 'd', 'ⅿ': 'm',
+        'Ⅼ': 'L', 'Ⅽ': 'C', 'Ⅾ': 'D', 'Ⅿ': 'M',
+        # Greek digamma (used as F-lookalike)
+        'Ϝ': 'F', 'ϝ': 'f',
         # Superscript/subscript digits
         '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
         '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
@@ -720,49 +725,85 @@ def parse_funstate_response(messages):
         result['name_history_shown'] = name_history_shown
         result['name_history_total'] = name_history_total
 
-    # ---- Stats (normalized text for reliable regex matching) ----
+    # ---- Stats — line-by-line for maximum robustness ----
     stats = {}
-    norm = combined_norm
+    norm_lines = combined_norm.split('\n')
 
-    div_match = re.search(r'divers\w*\s+([\d.]+%)', norm, re.IGNORECASE)
-    if div_match:
-        stats['message_diversity'] = div_match.group(1)
+    for line in norm_lines:
+        line = line.strip()
+        if not line:
+            continue
+        ll = line.lower()
 
-    from_match = re.search(r'from\s+([\d/]+)\s+to\s+([\d/]+)', norm, re.IGNORECASE)
-    if from_match:
-        stats['from_date'] = from_match.group(1)
-        stats['to_date'] = from_match.group(2)
+        # "Message diversity 52.10%"
+        if not stats.get('message_diversity') and 'divers' in ll:
+            m = re.search(r'([\d.]+%)', line)
+            if m:
+                stats['message_diversity'] = m.group(1)
 
-    msg_match = re.search(r'(\d+)\s+mess\w*\s+in\s+(\d+)\s+gro\w+', norm, re.IGNORECASE)
-    if msg_match:
-        stats['total_messages'] = int(msg_match.group(1))
-        stats['total_groups'] = int(msg_match.group(2))
+        # "From 10/19/2025 to 6/23/2026"
+        if not stats.get('from_date') and 'from' in ll and 'to' in ll:
+            m = re.search(r'from\s+([\d/]+)\s+to\s+([\d/]+)', line, re.IGNORECASE)
+            if m:
+                stats['from_date'] = m.group(1)
+                stats['to_date'] = m.group(2)
 
-    replies_match = re.search(r'([\d.]+%)\s+repli\w*\s+([\d.]+%)\s+med\w+', norm, re.IGNORECASE)
-    if replies_match:
-        stats['replies_percent'] = replies_match.group(1)
-        stats['media_percent'] = replies_match.group(2)
+        # "4482 messages in 8 groups"
+        if not stats.get('total_messages') and 'mess' in ll and 'in' in ll and 'gro' in ll:
+            m = re.search(r'(\d+)\s+\w+\s+in\s+(\d+)', line, re.IGNORECASE)
+            if m:
+                stats['total_messages'] = int(m.group(1))
+                stats['total_groups'] = int(m.group(2))
 
-    circles_match = re.search(r'circ\w*:\s*(\d+)[^\n]*?voice:\s*(\d+)', norm, re.IGNORECASE)
-    if circles_match:
-        stats['circles'] = int(circles_match.group(1))
-        stats['voice'] = int(circles_match.group(2))
+        # "39.67% replies 13.03% media"
+        if not stats.get('replies_percent') and ('rep' in ll or 'med' in ll):
+            pcts = re.findall(r'[\d.]+%', line)
+            if len(pcts) >= 2:
+                stats['replies_percent'] = pcts[0]
+                stats['media_percent'] = pcts[1]
 
-    fav_match = re.search(r'favor\w*\s+gro\w+:\s*(.+?)(?:\n|$)', norm, re.IGNORECASE)
-    if fav_match:
-        stats['favorite_group'] = fav_match.group(1).strip()
+        # "Circles: 0, voice: 0"
+        if not stats.get('circles') and 'circ' in ll:
+            mc = re.search(r'circ\w*:\s*(\d+)', line, re.IGNORECASE)
+            if mc:
+                stats['circles'] = int(mc.group(1))
+        if stats.get('circles') is None and 'voice' in ll:
+            mv = re.search(r'voice:\s*(\d+)', line, re.IGNORECASE)
+            if mv:
+                stats['voice'] = int(mv.group(1))
+        if 'circ' in ll and 'voice' in ll:
+            mc = re.search(r'circ\w*:\s*(\d+)', line, re.IGNORECASE)
+            mv = re.search(r'voice:\s*(\d+)', line, re.IGNORECASE)
+            if mc:
+                stats['circles'] = int(mc.group(1))
+            if mv:
+                stats['voice'] = int(mv.group(1))
 
-    looking_match = re.search(r'were?\s+look\w*\s+for:\s*(\d+)', norm, re.IGNORECASE)
-    if looking_match:
-        stats['were_looking_for'] = int(looking_match.group(1))
+        # "Favorite group: Abdul Dev Official Community"
+        if not stats.get('favorite_group') and ('favor' in ll or 'fav' in ll) and 'gro' in ll:
+            ci = line.find(':')
+            if ci != -1:
+                val = line[ci+1:].strip()
+                if val:
+                    stats['favorite_group'] = val
 
-    admin_match = re.search(r'admin\s+in\s+gro\w+:\s*(\d+)', norm, re.IGNORECASE)
-    if admin_match:
-        stats['admin_in_groups'] = int(admin_match.group(1))
+        # "Were looking for: 1"
+        if not stats.get('were_looking_for') and 'look' in ll and 'for' in ll:
+            m = re.search(r':\s*(\d+)', line)
+            if m:
+                stats['were_looking_for'] = int(m.group(1))
 
-    sticker_count_match = re.search(r'stickersets?:\s*(\d+)', norm, re.IGNORECASE)
-    if sticker_count_match:
-        stats['stickersets_count'] = int(sticker_count_match.group(1))
+        # "Admin in groups: 2"
+        if not stats.get('admin_in_groups') and 'admin' in ll and 'gro' in ll:
+            m = re.search(r':\s*(\d+)', line)
+            if m:
+                stats['admin_in_groups'] = int(m.group(1))
+
+        # "Stickersets: 11"
+        if not stats.get('stickersets_count') and 'sticker' in ll:
+            m = re.search(r'stickersets?\s*:\s*(\d+)', line, re.IGNORECASE)
+            if m:
+                stats['stickersets_count'] = int(m.group(1))
 
     if sticker_set:
         stats['sticker_links'] = list(sticker_set)
@@ -1013,9 +1054,11 @@ for cmd in ALL_COMMANDS:
     def make_endpoint(cmd):
         @require_api_key
         def endpoint(value):
+            t_start = time.time()
             cached = get_cached(cmd, value)
             if cached is not None:
                 cached = finalize_response(cached)
+                cached['time_taken'] = "0.00s (cached)"
                 log_usage(request.api_key, cmd, value, json.dumps(cached), True, None)
                 add_stats(cmd, value, True)
                 return jsonify(cached)
@@ -1030,10 +1073,13 @@ for cmd in ALL_COMMANDS:
                 group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
                 result = query_bot_sync(f"/{cmd} {value}", group_type)
 
+            elapsed = f"{time.time() - t_start:.2f}s"
+
             if cmd in ("funstate", "names"):
                 if isinstance(result, dict):
                     result['developer'] = DEVELOPER_TAG
                     result['tag'] = DEVELOPER_TAG
+                    result['time_taken'] = elapsed
                 if "error" not in result:
                     set_cache(cmd, value, result)
                 log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
@@ -1041,11 +1087,18 @@ for cmd in ALL_COMMANDS:
             else:
                 if isinstance(result, list):
                     finalized = [finalize_response(item) for item in result]
+                    for item in finalized:
+                        if isinstance(item, dict):
+                            item['time_taken'] = elapsed
                 else:
                     finalized = finalize_response(result)
-                if "error" not in finalized:
+                    if isinstance(finalized, dict):
+                        finalized['time_taken'] = elapsed
+                if isinstance(finalized, dict) and "error" not in finalized:
                     set_cache(cmd, value, finalized)
-                log_usage(request.api_key, cmd, value, json.dumps(finalized), 'error' not in finalized, None)
+                elif isinstance(finalized, list):
+                    set_cache(cmd, value, finalized)
+                log_usage(request.api_key, cmd, value, json.dumps(finalized), 'error' not in str(finalized), None)
                 return jsonify(finalized)
         return endpoint
     app.add_url_rule(f'/{cmd}/<value>', f'api_{cmd}', make_endpoint(cmd), methods=['GET'])
@@ -1053,8 +1106,11 @@ for cmd in ALL_COMMANDS:
 @app.route('/statu', methods=['GET'])
 @require_api_key
 def statu_endpoint():
+    t_start = time.time()
     result = query_bot_sync("/statu", "other")
     result = finalize_response(result)
+    if isinstance(result, dict):
+        result['time_taken'] = f"{time.time() - t_start:.2f}s"
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     add_stats("statu", "", 'error' not in result)
     return jsonify(result)
@@ -1066,285 +1122,447 @@ PUBLIC_SEARCH_HTML = """
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Felix API — Search</title>
+<title>rajfflive — Search</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
-:root{--bg:#0f172a;--card:#1e293b;--border:#334155;--accent:#38bdf8;--text:#e2e8f0;--muted:#94a3b8;--dim:#64748b;--green:#10b981;--red:#ef4444;}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;}
-.header{background:var(--card);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;}
-.logo{font-size:20px;font-weight:700;color:var(--accent);letter-spacing:-.5px;}
-.logo span{color:var(--muted);font-weight:400;font-size:14px;margin-left:6px;}
-.key-badge{font-size:12px;color:var(--dim);background:var(--bg);padding:4px 10px;border-radius:6px;border:1px solid var(--border);cursor:pointer;}
-.key-badge.set{color:var(--green);border-color:#064e3b;}
-.container{max-width:900px;margin:0 auto;padding:32px 20px;}
-.search-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px;margin-bottom:24px;}
-.search-title{font-size:16px;font-weight:600;margin-bottom:16px;color:var(--text);}
-.row{display:flex;gap:10px;flex-wrap:wrap;}
-.row .field{flex:1;min-width:140px;}
-label{display:block;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px;}
-select,input{width:100%;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px;outline:none;transition:border .15s;}
-select:focus,input:focus{border-color:var(--accent);}
-.btn{padding:10px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .15s;white-space:nowrap;}
-.btn-primary{background:var(--accent);color:#0f172a;}
-.btn:hover{opacity:.85;}
-.btn:disabled{opacity:.45;cursor:not-allowed;}
-.result-box{background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden;margin-bottom:24px;}
-.result-header{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-size:13px;}
-.result-status{display:flex;align-items:center;gap:8px;}
-.dot{width:8px;height:8px;border-radius:50%;}
-.dot-green{background:var(--green);}
-.dot-red{background:var(--red);}
-.dot-yellow{background:#f59e0b;}
-pre.json{padding:20px;font-size:12.5px;line-height:1.7;overflow-x:auto;white-space:pre-wrap;word-break:break-all;color:#a5f3fc;font-family:'Fira Code','Cascadia Code',monospace;}
-.spinner{display:inline-block;width:18px;height:18px;border:2px solid #334155;border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg)}}
-.empty{padding:48px 20px;text-align:center;color:var(--dim);}
-.empty-icon{font-size:40px;margin-bottom:12px;}
-.empty p{font-size:14px;}
-/* Modal */
-.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;align-items:center;justify-content:center;}
-.overlay.open{display:flex;}
-.modal{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px;width:90%;max-width:440px;}
-.modal h3{font-size:16px;font-weight:600;margin-bottom:8px;}
-.modal p{font-size:13px;color:var(--muted);margin-bottom:18px;}
-.modal-btns{display:flex;gap:10px;justify-content:flex-end;}
-.btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text);padding:9px 18px;border-radius:8px;cursor:pointer;font-size:14px;}
-/* Cards parsed view */
-.info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;padding:20px;}
-.info-card{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:14px;}
-.info-label{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:4px;}
-.info-value{font-size:14px;color:var(--text);word-break:break-all;}
-.tag-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
-.tag{background:#0c2a4a;color:var(--accent);padding:3px 8px;border-radius:99px;font-size:12px;}
-.view-toggle{display:flex;gap:6px;}
-.vbtn{padding:5px 12px;border-radius:6px;font-size:12px;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--muted);}
-.vbtn.active{background:#1e3a5f;color:var(--accent);border-color:var(--accent);}
+:root{
+  --bg:#060d1a;--surface:#0d1b2e;--card:#0f2137;--border:#1a3050;
+  --accent:#00c2ff;--accent2:#7c3aed;--text:#e8f4ff;--muted:#6b8aaa;
+  --dim:#3a5570;--green:#00d97e;--red:#ff4d6d;--yellow:#ffb830;
+  --glow:0 0 20px rgba(0,194,255,.15);
+}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;background-image:radial-gradient(ellipse at 20% 0%,rgba(0,194,255,.06) 0%,transparent 60%),radial-gradient(ellipse at 80% 100%,rgba(124,58,237,.06) 0%,transparent 60%);}
+/* HEADER */
+.header{background:rgba(13,27,46,.9);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;}
+.logo{display:flex;align-items:center;gap:10px;}
+.logo-icon{width:32px;height:32px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:900;color:#fff;letter-spacing:-1px;}
+.logo-text{font-size:18px;font-weight:700;color:var(--text);}
+.logo-sub{font-size:11px;color:var(--muted);margin-top:1px;}
+.header-right{display:flex;align-items:center;gap:10px;}
+.key-pill{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:99px;padding:6px 14px;cursor:pointer;transition:border-color .2s;}
+.key-pill:hover{border-color:var(--accent);}
+.key-pill.set{border-color:rgba(0,217,126,.4);background:rgba(0,217,126,.05);}
+.key-pill-dot{width:7px;height:7px;border-radius:50%;background:var(--dim);flex-shrink:0;}
+.key-pill.set .key-pill-dot{background:var(--green);}
+.key-pill-text{font-size:12px;color:var(--muted);font-family:monospace;}
+.key-pill.set .key-pill-text{color:var(--green);}
+/* CONTAINER */
+.container{max-width:960px;margin:0 auto;padding:28px 20px;}
+/* SEARCH CARD */
+.search-card{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:28px;margin-bottom:22px;box-shadow:var(--glow);}
+.search-row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;}
+.field{flex:1;min-width:130px;}
+.field label{display:block;font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;font-weight:600;}
+select,input[type=text]{width:100%;padding:11px 14px;background:var(--surface);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;outline:none;transition:border .2s,box-shadow .2s;-webkit-appearance:none;}
+select:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,194,255,.1);}
+.search-btn{padding:11px 28px;background:linear-gradient(135deg,var(--accent),#0080ff);border:none;border-radius:10px;color:#fff;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;transition:opacity .2s,transform .1s;letter-spacing:.3px;}
+.search-btn:hover{opacity:.9;}
+.search-btn:active{transform:scale(.97);}
+.search-btn:disabled{opacity:.4;cursor:not-allowed;transform:none;}
+/* COMMANDS GRID */
+.cmds-section{margin-bottom:22px;}
+.cmds-title{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;font-weight:600;}
+.cmds-grid{display:flex;flex-wrap:wrap;gap:8px;}
+.cmd-chip{padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:99px;font-size:12px;color:var(--muted);cursor:pointer;transition:all .15s;font-family:monospace;font-weight:600;}
+.cmd-chip:hover,.cmd-chip.active{background:rgba(0,194,255,.1);border-color:var(--accent);color:var(--accent);}
+/* RESULT BOX */
+.result-card{background:var(--card);border:1px solid var(--border);border-radius:20px;overflow:hidden;margin-bottom:22px;}
+.result-bar{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;}
+.status-row{display:flex;align-items:center;gap:10px;}
+.dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;}
+.dot-green{background:var(--green);box-shadow:0 0 8px var(--green);}
+.dot-red{background:var(--red);box-shadow:0 0 8px var(--red);}
+.dot-yellow{background:var(--yellow);box-shadow:0 0 8px var(--yellow);animation:pulse 1s infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.status-text{font-size:13px;color:var(--muted);}
+.time-badge{font-size:11px;padding:3px 8px;background:var(--surface);border:1px solid var(--border);border-radius:99px;color:var(--dim);font-family:monospace;}
+.right-actions{display:flex;align-items:center;gap:8px;}
+.vbtn{padding:5px 13px;border-radius:7px;font-size:12px;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--muted);font-weight:500;transition:all .15s;}
+.vbtn.active{background:rgba(0,194,255,.12);color:var(--accent);border-color:rgba(0,194,255,.4);}
+.copy-btn{padding:5px 12px;border-radius:7px;font-size:12px;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--muted);transition:all .15s;}
+.copy-btn:hover{border-color:var(--accent);color:var(--accent);}
+pre.json-out{padding:22px;font-size:12.5px;line-height:1.75;overflow-x:auto;white-space:pre-wrap;word-break:break-all;color:#7dd3fc;font-family:'Cascadia Code','Fira Code','Consolas',monospace;max-height:520px;overflow-y:auto;}
+/* CARDS VIEW */
+.info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;padding:20px;}
+.info-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;transition:border-color .15s;}
+.info-card:hover{border-color:rgba(0,194,255,.25);}
+.info-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:5px;font-weight:600;}
+.info-value{font-size:14px;color:var(--text);word-break:break-all;line-height:1.4;}
+.tag-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+.tag{background:rgba(0,194,255,.1);color:var(--accent);border:1px solid rgba(0,194,255,.25);padding:4px 10px;border-radius:99px;font-size:12px;font-family:monospace;cursor:pointer;}
+.tag:hover{background:rgba(0,194,255,.2);}
 .hist-table{width:100%;border-collapse:collapse;font-size:13px;}
-.hist-table td{padding:8px 20px;border-bottom:1px solid #1e293b;}
-.hist-table td:first-child{color:var(--dim);width:110px;}
+.hist-table tr:hover td{background:rgba(0,194,255,.04);}
+.hist-table td{padding:9px 22px;border-bottom:1px solid var(--border);}
+.hist-table td:first-child{color:var(--dim);width:120px;font-family:monospace;font-size:12px;}
+.hist-section{padding:0 20px 22px;}
+.hist-title{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-bottom:12px;font-weight:600;}
+/* EMPTY STATE */
+.empty-state{padding:64px 20px;text-align:center;}
+.empty-icon{font-size:48px;margin-bottom:16px;opacity:.6;}
+.empty-title{font-size:17px;font-weight:600;color:var(--muted);margin-bottom:6px;}
+.empty-sub{font-size:13px;color:var(--dim);}
+/* KEY MODAL */
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);backdrop-filter:blur(4px);z-index:500;align-items:center;justify-content:center;}
+.overlay.open{display:flex;}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:32px;width:90%;max-width:460px;box-shadow:0 20px 60px rgba(0,0,0,.5);}
+.modal-title{font-size:18px;font-weight:700;margin-bottom:6px;}
+.modal-sub{font-size:13px;color:var(--muted);margin-bottom:24px;line-height:1.5;}
+.key-input-wrap{position:relative;margin-bottom:14px;}
+.key-input-wrap input{padding-right:44px;font-family:monospace;font-size:13px;}
+.eye-btn{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;}
+.key-actions{display:flex;gap:8px;margin-bottom:20px;}
+.ka-btn{flex:1;padding:9px;border:1px solid var(--border);background:var(--surface);border-radius:8px;color:var(--muted);cursor:pointer;font-size:12px;transition:all .15s;font-weight:500;}
+.ka-btn:hover{border-color:var(--accent);color:var(--accent);}
+.ka-btn.danger:hover{border-color:var(--red);color:var(--red);}
+.modal-footer{display:flex;gap:10px;justify-content:flex-end;}
+.btn-cancel{background:transparent;border:1px solid var(--border);color:var(--text);padding:10px 20px;border-radius:9px;cursor:pointer;font-size:14px;font-weight:500;}
+.btn-save{background:linear-gradient(135deg,var(--accent),#0080ff);border:none;color:#fff;padding:10px 24px;border-radius:9px;cursor:pointer;font-size:14px;font-weight:700;}
+.btn-save:hover{opacity:.9;}
+/* TOAST */
+.toast{position:fixed;bottom:24px;right:24px;background:#1a2f45;border:1px solid var(--border);border-radius:12px;padding:12px 18px;font-size:13px;color:var(--text);z-index:999;opacity:0;transform:translateY(10px);transition:all .3s;pointer-events:none;}
+.toast.show{opacity:1;transform:translateY(0);}
+@media(max-width:600px){
+  .search-row{flex-direction:column;}
+  .search-btn{width:100%;}
+  .header{padding:12px 16px;}
+  .container{padding:16px 12px;}
+}
 </style>
 </head>
 <body>
+
 <div class="header">
-    <div class="logo">Felix API <span>Search Panel</span></div>
-    <div class="key-badge" id="keyBadge" onclick="openKeyModal()">🔑 Set API Key</div>
+  <div class="logo">
+    <div class="logo-icon">F</div>
+    <div>
+      <div class="logo-text">rajfflive</div>
+      <div class="logo-sub">Search Panel</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="key-pill" id="keyPill" onclick="openKeyModal()">
+      <div class="key-pill-dot"></div>
+      <span class="key-pill-text" id="keyPillText">Set API Key</span>
+    </div>
+  </div>
 </div>
 
 <div class="container">
-    <div class="search-box">
-        <div class="search-title">Query the API</div>
-        <div class="row">
-            <div class="field" style="max-width:160px;">
-                <label>Command</label>
-                <select id="cmd">
-                    <option value="funstate">funstate</option>
-                    <option value="names">names</option>
-                    <option value="num">num</option>
-                    <option value="veh">veh</option>
-                    <option value="vnum">vnum</option>
-                    <option value="upiinfo">upiinfo</option>
-                    <option value="fam">fam</option>
-                    <option value="insta">insta</option>
-                    <option value="ip">ip</option>
-                    <option value="email">email</option>
-                    <option value="tg">tg</option>
-                    <option value="ifsc">ifsc</option>
-                    <option value="adhar">adhar</option>
-                    <option value="imei">imei</option>
-                    <option value="pak">pak</option>
-                    <option value="family">family</option>
-                    <option value="gst">gst</option>
-                    <option value="pan">pan</option>
-                    <option value="leak">leak</option>
-                </select>
-            </div>
-            <div class="field">
-                <label>Value</label>
-                <input type="text" id="val" placeholder="e.g. @username, phone number..." />
-            </div>
-            <div class="field" style="max-width:120px;display:flex;align-items:flex-end;">
-                <button class="btn btn-primary" id="searchBtn" onclick="doSearch()" style="width:100%">Search</button>
-            </div>
-        </div>
-    </div>
 
-    <div class="result-box" id="resultBox" style="display:none;">
-        <div class="result-header">
-            <div class="result-status">
-                <div class="dot dot-yellow" id="statusDot"></div>
-                <span id="statusText">Searching...</span>
-            </div>
-            <div class="view-toggle">
-                <button class="vbtn active" id="vRaw" onclick="switchView('raw')">JSON</button>
-                <button class="vbtn" id="vCard" onclick="switchView('card')">Cards</button>
-            </div>
-        </div>
-        <div id="rawView">
-            <pre class="json" id="jsonOutput"></pre>
-        </div>
-        <div id="cardView" style="display:none;"></div>
-    </div>
+  <!-- COMMAND CHIPS -->
+  <div class="cmds-section">
+    <div class="cmds-title">Available Commands — click to select</div>
+    <div class="cmds-grid" id="cmdChips"></div>
+  </div>
 
-    <div class="empty" id="emptyState">
-        <div class="empty-icon">🔍</div>
-        <p>Enter a command and value above, then click Search.<br>Your API key is saved in the browser.</p>
+  <!-- SEARCH ROW -->
+  <div class="search-card">
+    <div class="search-row">
+      <div class="field" style="max-width:170px;">
+        <label>Command</label>
+        <select id="cmdSelect" onchange="syncChip(this.value)">
+          <option value="funstate">funstate</option>
+          <option value="names">names</option>
+          <option value="num">num</option>
+          <option value="veh">veh</option>
+          <option value="vnum">vnum</option>
+          <option value="upiinfo">upiinfo</option>
+          <option value="fam">fam</option>
+          <option value="insta">insta</option>
+          <option value="ip">ip</option>
+          <option value="email">email</option>
+          <option value="tg">tg</option>
+          <option value="ifsc">ifsc</option>
+          <option value="adhar">adhar</option>
+          <option value="imei">imei</option>
+          <option value="pak">pak</option>
+          <option value="family">family</option>
+          <option value="gst">gst</option>
+          <option value="pan">pan</option>
+          <option value="leak">leak</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Value</label>
+        <input type="text" id="val" placeholder="@username, phone number, IP...">
+      </div>
+      <button class="search-btn" id="searchBtn" onclick="doSearch()">Search</button>
     </div>
+  </div>
+
+  <!-- RESULT -->
+  <div class="result-card" id="resultCard" style="display:none;">
+    <div class="result-bar">
+      <div class="status-row">
+        <div class="dot dot-yellow" id="statusDot"></div>
+        <span class="status-text" id="statusText">Searching…</span>
+        <span class="time-badge" id="timeBadge" style="display:none;"></span>
+      </div>
+      <div class="right-actions">
+        <button class="copy-btn" onclick="copyResult()">Copy JSON</button>
+        <button class="vbtn active" id="vRaw" onclick="switchView('raw')">JSON</button>
+        <button class="vbtn" id="vCard" onclick="switchView('card')">Cards</button>
+      </div>
+    </div>
+    <div id="rawView"><pre class="json-out" id="jsonOut"></pre></div>
+    <div id="cardView" style="display:none;"></div>
+  </div>
+
+  <!-- EMPTY STATE -->
+  <div class="empty-state" id="emptyState">
+    <div class="empty-icon">🔍</div>
+    <div class="empty-title">Ready to Search</div>
+    <div class="empty-sub">Select a command, enter a value and hit Search.<br>Your API key is saved locally in the browser.</div>
+  </div>
+
 </div>
 
-<!-- Key Modal -->
+<!-- KEY MODAL -->
 <div class="overlay" id="keyOverlay" onclick="if(event.target===this)closeKeyModal()">
-    <div class="modal">
-        <h3>Set Your API Key</h3>
-        <p>Your key is stored locally in the browser and never sent to our servers except as the <code>api_key</code> query param.</p>
-        <input type="text" id="keyInput" placeholder="Paste your API key..." style="margin-bottom:16px;">
-        <div class="modal-btns">
-            <button class="btn-ghost" onclick="closeKeyModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="saveKey()">Save Key</button>
-        </div>
+  <div class="modal">
+    <div class="modal-title">API Key</div>
+    <div class="modal-sub">Your key is stored in the browser (localStorage) and only sent as a query parameter when you search.</div>
+    <div class="key-input-wrap">
+      <input type="password" id="keyInput" placeholder="Paste your API key here…">
+      <button class="eye-btn" onclick="toggleEye()" id="eyeBtn">👁</button>
     </div>
+    <div class="key-actions">
+      <button class="ka-btn" onclick="pasteKey()">Paste</button>
+      <button class="ka-btn" onclick="copyKey()">Copy</button>
+      <button class="ka-btn danger" onclick="clearKey()">Clear Key</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeKeyModal()">Cancel</button>
+      <button class="btn-save" onclick="saveKey()">Save Key</button>
+    </div>
+  </div>
 </div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
 
 <script>
+const COMMANDS = [
+  {v:'funstate', label:'funstate', hint:'Telegram user lookup (full stats)'},
+  {v:'names',    label:'names',    hint:'Alias for funstate'},
+  {v:'num',      label:'num',      hint:'Phone number lookup'},
+  {v:'veh',      label:'veh',      hint:'Vehicle info'},
+  {v:'vnum',     label:'vnum',     hint:'Vehicle number'},
+  {v:'upiinfo',  label:'upiinfo',  hint:'UPI ID lookup'},
+  {v:'tg',       label:'tg',       hint:'Telegram ID/username lookup'},
+  {v:'email',    label:'email',    hint:'Email lookup'},
+  {v:'ip',       label:'ip',       hint:'IP address info'},
+  {v:'adhar',    label:'adhar',    hint:'Aadhaar lookup'},
+  {v:'pan',      label:'pan',      hint:'PAN card lookup'},
+  {v:'ifsc',     label:'ifsc',     hint:'Bank IFSC lookup'},
+  {v:'imei',     label:'imei',     hint:'IMEI lookup'},
+  {v:'gst',      label:'gst',      hint:'GST number lookup'},
+  {v:'insta',    label:'insta',    hint:'Instagram lookup'},
+  {v:'pak',      label:'pak',      hint:'Pakistan lookup'},
+  {v:'fam',      label:'fam',      hint:'Family lookup'},
+  {v:'family',   label:'family',   hint:'Family lookup'},
+  {v:'leak',     label:'leak',     hint:'Data breach check'},
+];
+
 let currentData = null;
 let currentView = 'raw';
 
+// Build chips
+const chipsEl = document.getElementById('cmdChips');
+COMMANDS.forEach(c => {
+  const el = document.createElement('div');
+  el.className = 'cmd-chip' + (c.v === 'funstate' ? ' active' : '');
+  el.textContent = c.label;
+  el.title = c.hint;
+  el.onclick = () => selectCmd(c.v);
+  el.id = 'chip_' + c.v;
+  chipsEl.appendChild(el);
+});
+
+function selectCmd(v){
+  document.querySelectorAll('.cmd-chip').forEach(c => c.classList.remove('active'));
+  const el = document.getElementById('chip_' + v);
+  if(el) el.classList.add('active');
+  document.getElementById('cmdSelect').value = v;
+  document.getElementById('val').focus();
+}
+function syncChip(v){
+  document.querySelectorAll('.cmd-chip').forEach(c => c.classList.remove('active'));
+  const el = document.getElementById('chip_' + v);
+  if(el) el.classList.add('active');
+}
+
+// KEY MANAGEMENT
+function updateKeyPill(){
+  const k = localStorage.getItem('felixApiKey');
+  const pill = document.getElementById('keyPill');
+  const txt  = document.getElementById('keyPillText');
+  if(k){ pill.classList.add('set'); txt.textContent = '••••' + k.slice(-6); }
+  else  { pill.classList.remove('set'); txt.textContent = 'Set API Key'; }
+}
 function openKeyModal(){
-    const k = localStorage.getItem('felixApiKey') || '';
-    document.getElementById('keyInput').value = k;
-    document.getElementById('keyOverlay').classList.add('open');
-    setTimeout(()=>document.getElementById('keyInput').focus(),100);
+  const k = localStorage.getItem('felixApiKey') || '';
+  document.getElementById('keyInput').value = k;
+  document.getElementById('keyInput').type = 'password';
+  document.getElementById('eyeBtn').textContent = '👁';
+  document.getElementById('keyOverlay').classList.add('open');
+  setTimeout(() => document.getElementById('keyInput').focus(), 80);
 }
 function closeKeyModal(){ document.getElementById('keyOverlay').classList.remove('open'); }
 function saveKey(){
-    const k = document.getElementById('keyInput').value.trim();
-    if(k){ localStorage.setItem('felixApiKey', k); updateKeyBadge(); }
-    closeKeyModal();
+  const k = document.getElementById('keyInput').value.trim();
+  if(k){ localStorage.setItem('felixApiKey', k); updateKeyPill(); showToast('Key saved ✓'); }
+  closeKeyModal();
 }
-function updateKeyBadge(){
-    const k = localStorage.getItem('felixApiKey');
-    const badge = document.getElementById('keyBadge');
-    if(k){ badge.textContent = '🔑 Key: …' + k.slice(-6); badge.classList.add('set'); }
-    else { badge.textContent = '🔑 Set API Key'; badge.classList.remove('set'); }
+function toggleEye(){
+  const inp = document.getElementById('keyInput');
+  const btn = document.getElementById('eyeBtn');
+  if(inp.type === 'password'){ inp.type = 'text'; btn.textContent = '🙈'; }
+  else { inp.type = 'password'; btn.textContent = '👁'; }
 }
-updateKeyBadge();
+async function pasteKey(){
+  try{
+    const t = await navigator.clipboard.readText();
+    document.getElementById('keyInput').value = t.trim();
+    showToast('Pasted from clipboard');
+  } catch(e){ showToast('Clipboard not available'); }
+}
+function copyKey(){
+  const k = document.getElementById('keyInput').value.trim();
+  if(!k){ showToast('No key to copy'); return; }
+  navigator.clipboard.writeText(k).then(() => showToast('Key copied ✓')).catch(() => showToast('Copy failed'));
+}
+function clearKey(){
+  localStorage.removeItem('felixApiKey');
+  document.getElementById('keyInput').value = '';
+  updateKeyPill();
+  showToast('Key cleared');
+  closeKeyModal();
+}
+updateKeyPill();
 
+// SEARCH
 document.getElementById('val').addEventListener('keydown', e => { if(e.key==='Enter') doSearch(); });
 
 async function doSearch(){
-    const apiKey = localStorage.getItem('felixApiKey');
-    if(!apiKey){ openKeyModal(); return; }
-    const cmd = document.getElementById('cmd').value;
-    const val = document.getElementById('val').value.trim();
-    if(!val){ document.getElementById('val').focus(); return; }
+  const apiKey = localStorage.getItem('felixApiKey');
+  if(!apiKey){ openKeyModal(); return; }
+  const cmd = document.getElementById('cmdSelect').value;
+  const val = document.getElementById('val').value.trim();
+  if(!val){ document.getElementById('val').focus(); return; }
 
-    document.getElementById('emptyState').style.display='none';
-    document.getElementById('resultBox').style.display='block';
-    document.getElementById('statusDot').className='dot dot-yellow';
-    document.getElementById('statusText').textContent='Searching…';
-    document.getElementById('jsonOutput').textContent='';
-    document.getElementById('cardView').innerHTML='';
-    document.getElementById('searchBtn').disabled=true;
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('resultCard').style.display = 'block';
+  document.getElementById('statusDot').className = 'dot dot-yellow';
+  document.getElementById('statusText').textContent = 'Searching…';
+  document.getElementById('timeBadge').style.display = 'none';
+  document.getElementById('jsonOut').textContent = '';
+  document.getElementById('cardView').innerHTML = '';
+  document.getElementById('searchBtn').disabled = true;
+  currentData = null;
 
-    try {
-        const url = `/${cmd}/${encodeURIComponent(val)}?api_key=${encodeURIComponent(apiKey)}`;
-        const start = Date.now();
-        const resp = await fetch(url);
-        const elapsed = ((Date.now()-start)/1000).toFixed(1);
-        const data = await resp.json();
-        currentData = data;
+  const t0 = Date.now();
+  try{
+    const url = '/' + cmd + '/' + encodeURIComponent(val) + '?api_key=' + encodeURIComponent(apiKey);
+    const resp = await fetch(url);
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
+    const data = await resp.json();
+    currentData = data;
 
-        if(data.error){
-            document.getElementById('statusDot').className='dot dot-red';
-            document.getElementById('statusText').textContent = 'Error — ' + elapsed + 's';
-            document.getElementById('jsonOutput').textContent = JSON.stringify(data, null, 2);
-            document.getElementById('cardView').innerHTML='';
-        } else {
-            document.getElementById('statusDot').className='dot dot-green';
-            document.getElementById('statusText').textContent = 'Success — ' + elapsed + 's';
-            document.getElementById('jsonOutput').textContent = JSON.stringify(data, null, 2);
-            renderCards(data);
-        }
-    } catch(e){
-        document.getElementById('statusDot').className='dot dot-red';
-        document.getElementById('statusText').textContent = 'Network error';
-        document.getElementById('jsonOutput').textContent = String(e);
+    const tb = document.getElementById('timeBadge');
+    tb.textContent = (data.time_taken || elapsed + 's');
+    tb.style.display = '';
+
+    if(data.error){
+      document.getElementById('statusDot').className = 'dot dot-red';
+      document.getElementById('statusText').textContent = 'Error';
+    } else {
+      document.getElementById('statusDot').className = 'dot dot-green';
+      document.getElementById('statusText').textContent = 'Success — ' + cmd + ' / ' + val;
+      renderCards(data);
     }
-    document.getElementById('searchBtn').disabled=false;
+    document.getElementById('jsonOut').textContent = JSON.stringify(data, null, 2);
+  } catch(e){
+    document.getElementById('statusDot').className = 'dot dot-red';
+    document.getElementById('statusText').textContent = 'Network error';
+    document.getElementById('jsonOut').textContent = String(e);
+  }
+  document.getElementById('searchBtn').disabled = false;
+}
+
+function copyResult(){
+  if(!currentData){ showToast('Nothing to copy'); return; }
+  navigator.clipboard.writeText(JSON.stringify(currentData, null, 2))
+    .then(() => showToast('JSON copied ✓'))
+    .catch(() => showToast('Copy failed'));
 }
 
 function switchView(v){
-    currentView = v;
-    document.getElementById('rawView').style.display = v==='raw' ? 'block' : 'none';
-    document.getElementById('cardView').style.display = v==='card' ? 'block' : 'none';
-    document.getElementById('vRaw').className = 'vbtn' + (v==='raw' ? ' active' : '');
-    document.getElementById('vCard').className = 'vbtn' + (v==='card' ? ' active' : '');
+  currentView = v;
+  document.getElementById('rawView').style.display = v==='raw' ? '' : 'none';
+  document.getElementById('cardView').style.display = v==='card' ? '' : 'none';
+  document.getElementById('vRaw').className = 'vbtn' + (v==='raw' ? ' active' : '');
+  document.getElementById('vCard').className = 'vbtn' + (v==='card' ? ' active' : '');
 }
 
 function renderCards(data){
-    const cv = document.getElementById('cardView');
-    if(!data || typeof data !== 'object'){ cv.innerHTML='<div class="empty"><p>No card view available</p></div>'; return; }
-
-    let html = '<div class="info-grid">';
-
-    const skip = new Set(['developer','tag','name_history','usernames','stats','sticker_links']);
-
-    // Name
-    if(data.name) html += card('Display Name', escHtml(data.name));
-    if(data.id) html += card('Telegram ID', data.id);
-    if(data.channel) html += card('Channel', escHtml(data.channel));
-    if(data.bio_link) html += card('Bio Link', `<a href="${escHtml(data.bio_link)}" target="_blank" style="color:var(--accent);">${escHtml(data.bio_link)}</a>`);
-
-    // Usernames
-    if(data.usernames && data.usernames.length){
-        const total = data.usernames_total ? ` (${data.usernames_shown} of ${data.usernames_total})` : '';
-        let tags = data.usernames.map(u => `<span class="tag">${escHtml(u)}</span>`).join('');
-        html += `<div class="info-card" style="grid-column:1/-1"><div class="info-label">Usernames${total}</div><div class="tag-list">${tags}</div></div>`;
-    }
-
-    // Stats
-    if(data.stats && typeof data.stats === 'object'){
-        const s = data.stats;
-        if(s.message_diversity) html += card('Msg Diversity', s.message_diversity);
-        if(s.total_messages) html += card('Total Messages', s.total_messages + ' in ' + (s.total_groups||'?') + ' groups');
-        if(s.from_date) html += card('Active Period', s.from_date + ' → ' + (s.to_date||'?'));
-        if(s.replies_percent) html += card('Replies / Media', s.replies_percent + ' / ' + (s.media_percent||'?'));
-        if(s.circles !== undefined) html += card('Circles / Voice', s.circles + ' / ' + (s.voice||0));
-        if(s.favorite_group) html += card('Favorite Group', escHtml(s.favorite_group));
-        if(s.were_looking_for !== undefined) html += card('Were Looking For', s.were_looking_for);
-        if(s.stickersets_count !== undefined) html += card('Sticker Sets', s.stickersets_count);
-        if(s.admin_in_groups !== undefined) html += card('Admin In Groups', s.admin_in_groups);
-    }
-
-    // All other fields
-    for(const [k, v] of Object.entries(data)){
-        if(skip.has(k) || k==='name' || k==='id' || k==='channel' || k==='bio_link' || k==='usernames' || k==='usernames_shown' || k==='usernames_total' || k==='name_history_shown' || k==='name_history_total') continue;
-        if(typeof v === 'object') continue;
-        html += card(k, escHtml(String(v)));
-    }
-
-    html += '</div>';
-
-    // Name history table
-    if(data.name_history && data.name_history.length){
-        const total = data.name_history_total ? ` (${data.name_history_shown} of ${data.name_history_total} shown)` : '';
-        html += `<div style="padding:0 20px 20px;">
-            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:10px;">Name History${total}</div>
-            <table class="hist-table">`;
-        for(const h of data.name_history){
-            html += `<tr><td>${escHtml(h.date)}</td><td>${escHtml(h.name)}</td></tr>`;
-        }
-        html += '</table></div>';
-    }
-
-    cv.innerHTML = html;
+  const cv = document.getElementById('cardView');
+  if(!data || typeof data !== 'object'){ cv.innerHTML=''; return; }
+  const skip = new Set(['developer','tag','name_history','usernames','stats','sticker_links','name_history_shown','name_history_total','usernames_shown','usernames_total','time_taken']);
+  let h = '<div class="info-grid">';
+  if(data.name) h += ic('Display Name', esc(data.name));
+  if(data.id)   h += ic('Telegram ID', data.id);
+  if(data.time_taken) h += ic('Response Time', '<span style="color:var(--accent);font-family:monospace;">' + esc(data.time_taken) + '</span>');
+  if(data.channel) h += ic('Channel', esc(data.channel));
+  if(data.bio_link) h += ic('Bio / Channel Link', '<a href="' + esc(data.bio_link) + '" target="_blank" style="color:var(--accent);">' + esc(data.bio_link) + '</a>');
+  if(data.usernames && data.usernames.length){
+    const tot = data.usernames_total ? ' <span style="color:var(--dim);font-size:11px;">(' + data.usernames_shown + ' of ' + data.usernames_total + ')</span>' : '';
+    let tags = data.usernames.map(u => '<span class="tag" onclick="navigator.clipboard.writeText(\''+esc(u)+'\')" title="Click to copy">' + esc(u) + '</span>').join('');
+    h += '<div class="info-card" style="grid-column:1/-1"><div class="info-label">Usernames' + tot + '</div><div class="tag-list">' + tags + '</div></div>';
+  }
+  if(data.stats && typeof data.stats === 'object'){
+    const s = data.stats;
+    if(s.message_diversity) h += ic('Msg Diversity', s.message_diversity);
+    if(s.total_messages)    h += ic('Messages', s.total_messages + ' in ' + (s.total_groups||'?') + ' groups');
+    if(s.from_date)         h += ic('Active Period', s.from_date + ' → ' + (s.to_date||'?'));
+    if(s.replies_percent)   h += ic('Replies / Media', s.replies_percent + ' / ' + (s.media_percent||'?'));
+    if(s.circles !== undefined) h += ic('Circles / Voice', s.circles + ' / ' + (s.voice !== undefined ? s.voice : '?'));
+    if(s.favorite_group)    h += ic('Favorite Group', esc(s.favorite_group));
+    if(s.were_looking_for !== undefined) h += ic('Were Looking For', s.were_looking_for);
+    if(s.stickersets_count !== undefined) h += ic('Sticker Sets', s.stickersets_count);
+    if(s.admin_in_groups !== undefined)   h += ic('Admin In Groups', s.admin_in_groups);
+  }
+  for(const [k,v] of Object.entries(data)){
+    if(skip.has(k)||k==='name'||k==='id'||k==='channel'||k==='bio_link'||k==='usernames') continue;
+    if(typeof v === 'object') continue;
+    h += ic(k, esc(String(v)));
+  }
+  h += '</div>';
+  if(data.name_history && data.name_history.length){
+    const tot = data.name_history_total ? ' <span style="color:var(--dim);font-size:11px;">(' + data.name_history_shown + ' of ' + data.name_history_total + ' shown)</span>' : '';
+    h += '<div class="hist-section"><div class="hist-title">Name / Last Name History' + tot + '</div><table class="hist-table">';
+    data.name_history.forEach(r => { h += '<tr><td>' + esc(r.date) + '</td><td>' + esc(r.name) + '</td></tr>'; });
+    h += '</table></div>';
+  }
+  cv.innerHTML = h;
 }
 
-function card(label, value){
-    return `<div class="info-card"><div class="info-label">${label}</div><div class="info-value">${value}</div></div>`;
+function ic(label, value){
+  return '<div class="info-card"><div class="info-label">' + label + '</div><div class="info-value">' + value + '</div></div>';
 }
-function escHtml(s){
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+function esc(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+function showToast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+document.addEventListener('keydown', e => { if(e.key==='Escape') closeKeyModal(); });
 </script>
 </body>
 </html>
@@ -1363,7 +1581,7 @@ ADMIN_HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Felix API - Admin Panel</title>
+    <title>rajfflive - Admin Panel</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: 'Segoe UI', Arial, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
@@ -1447,7 +1665,7 @@ ADMIN_HTML = """
 </head>
 <body>
 <div class="sidebar">
-    <div class="sidebar-logo">Felix API <span>Admin Panel</span></div>
+    <div class="sidebar-logo">rajfflive <span>Admin Panel</span></div>
     <div class="nav-item active" onclick="showTab('dashboard')">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
         Dashboard
@@ -1567,13 +1785,17 @@ ADMIN_HTML = """
                 <tr><th>Key</th><th>Name</th><th>Expiry</th><th>Daily Limit</th><th>Status</th><th>Actions</th></tr>
                 {% for k in keys %}
                 <tr>
-                    <td><code>{{ k.key[:16] }}…</code></td>
+                    <td>
+                        <code id="key_{{ loop.index }}">{{ k.key[:20] }}…</code>
+                        <button onclick="copyFullKey('{{ k.key }}', this)" style="margin-left:6px;background:none;border:1px solid #334155;border-radius:4px;color:#64748b;font-size:10px;padding:2px 7px;cursor:pointer;" title="Copy full key">Copy</button>
+                    </td>
                     <td>{{ k.name }}</td>
                     <td>{{ k.expiry_days ~ 'd' if k.expiry_days > 0 else '∞ Forever' }}</td>
                     <td>{{ k.daily_limit if k.daily_limit > 0 else '∞ Unlimited' }}</td>
-                    <td><span class="badge {% if k.active %}badge-green{% else %}badge-red{% endif %}">{% if k.active %}Active{% else %}Revoked{% endif %}</span></td>
+                    <td><span class="badge {% if k.active %}badge-green{% else %}badge-red{% endif %}">{% if k.active %}Active{% else %}Paused{% endif %}</span></td>
                     <td>
-                        <a href="/admin/revoke/{{ k.key }}" class="action-link action-danger">Revoke</a>
+                        <a href="/admin/toggle_key/{{ k.key }}" class="action-link" style="color:{% if k.active %}#f59e0b{% else %}#10b981{% endif %}">{% if k.active %}Pause{% else %}Resume{% endif %}</a>
+                        <a href="/admin/revoke/{{ k.key }}" class="action-link action-danger" onclick="return confirm('Permanently revoke this key?')">Revoke</a>
                         <a href="/admin/delete/{{ k.key }}" class="action-link action-danger" onclick="return confirm('Delete this key?')">Delete</a>
                     </td>
                 </tr>
@@ -1744,6 +1966,15 @@ function showTab(tab) {
     });
     document.getElementById('page-title').textContent = titles[tab] || tab;
 }
+function copyFullKey(key, btn){
+    navigator.clipboard.writeText(key).then(()=>{
+        const orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        btn.style.color = '#34d399';
+        btn.style.borderColor = '#34d399';
+        setTimeout(()=>{ btn.textContent = orig; btn.style.color=''; btn.style.borderColor=''; }, 1800);
+    }).catch(()=>{ alert('Copy failed — key: ' + key); });
+}
 function openLog(row) {
     const time = row.dataset.time;
     const key = row.dataset.key;
@@ -1780,7 +2011,7 @@ def admin_login():
 <!DOCTYPE html>
 <html>
 <head>
-<title>Felix Admin Login</title>
+<title>rajfflive Login</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0;}}
 body{{font-family:'Segoe UI',Arial,sans-serif;background:#0f172a;display:flex;align-items:center;justify-content:center;min-height:100vh;}}
@@ -1797,7 +2028,7 @@ button:hover{{background:#0284c7;}}
 </head>
 <body>
 <div class="box">
-<h2>Felix API</h2>
+<h2>rajfflive</h2>
 <p>Admin Panel Login</p>
 {"<div class='err'>" + error + "</div>" if error else ""}
 <form method="post">
@@ -1884,6 +2115,20 @@ def admin_create_key():
     add_api_key(key, name, "admin", expiry_days, daily_limit)
     return redirect(url_for('admin_dashboard'))
 
+@app.route('/admin/toggle_key/<key>')
+@admin_login_required
+def admin_toggle_key(key):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT active FROM api_keys WHERE key=?", (key,))
+    row = c.fetchone()
+    if row:
+        new_active = 0 if row[0] else 1
+        c.execute("UPDATE api_keys SET active=? WHERE key=?", (new_active, key))
+        conn.commit()
+    conn.close()
+    return redirect(url_for('admin_dashboard'))
+
 @app.route('/admin/revoke/<key>')
 @admin_login_required
 def admin_revoke_key(key):
@@ -1925,14 +2170,7 @@ def admin_delete_account(acc_id):
 
 @app.route('/')
 def index():
-    return jsonify({
-        "service": "Felix API",
-        "developer": DEVELOPER_TAG,
-        "endpoints": ALL_COMMANDS,
-        "admin": "/admin/login",
-        "search": "/search",
-        "status": "running"
-    })
+    return redirect(url_for('public_search'))
 
 # ================= MAIN =================
 if __name__ == '__main__':
