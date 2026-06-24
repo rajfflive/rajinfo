@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, tl  # added tl for entity types
 from telethon.sessions import StringSession
 
 logging.basicConfig(level=logging.INFO)
@@ -433,70 +433,132 @@ def finalize_response(data):
     else:
         return data
 
-# ================= FUNSTATE RESPONSE PARSER =================
-def parse_funstate_response(text):
-    """Parse the Funstate bot response into a structured JSON object."""
+# ================= FUNSTATE RESPONSE PARSER (FIXED) =================
+def parse_funstate_response(messages):
+    """
+    Parse a list of Telethon Message objects from Funstate bot.
+    Extracts:
+      - all URLs, mentions, sticker pack links, channel link
+      - ID, usernames, name history, stats
+    """
     result = {}
-    raw = text
-
-    # 1. Extract all URLs (including t.me links)
-    url_pattern = r'https?://[^\s]+'
-    all_urls = re.findall(url_pattern, text)
-    links = [url for url in all_urls if url.strip()]
-    
-    # Also extract @mentions
-    mentions = re.findall(r'@[a-zA-Z0-9_]+', text)
-    for m in mentions:
-        if m not in links:
-            links.append(m)
-    links = list(set(links))
-    
-    # Separate sticker pack links and channel link
-    sticker_links = []
+    raw_text_parts = []
+    all_links = set()
+    sticker_links = set()
     channel_link = None
-    for link in links:
-        if 'addstickers' in link or 't.me/addstickers' in link:
-            sticker_links.append(link)
-        elif 't.me/Funstate_7bot?start=' in link:
-            # ignore
-            pass
-        else:
-            if link.startswith('https://t.me/') and 'addstickers' not in link:
-                channel_link = link
-    # Also look for sticker pack links in the text using regex (in case they appear without protocol)
-    sticker_urls = re.findall(r't\.me/addstickers/[^\s]+', text)
-    for su in sticker_urls:
-        if su not in sticker_links:
-            sticker_links.append(su)
-    
-    # Clean links: remove duplicates and filter out Funstate start links
-    links = [l for l in links if 'Funstate_7bot?start=' not in l]
-    
-    result['links'] = links
-    if sticker_links:
-        result['sticker_pack_links'] = sticker_links
-    if channel_link:
-        result['channel_link'] = channel_link
 
-    # 2. Extract ID
-    id_match = re.search(r'IＤ:\s*(\d+)', text)
+    # Collect entities from all messages
+    for msg in messages:
+        raw_text_parts.append(msg.raw_text)
+        # Process text entities (URLs, mentions, text URLs)
+        if msg.entities:
+            for entity in msg.entities:
+                if isinstance(entity, tl.types.MessageEntityUrl):
+                    url = msg.text[entity.offset:entity.offset + entity.length]
+                    all_links.add(url)
+                    if 'addstickers' in url or 't.me/addstickers' in url:
+                        sticker_links.add(url)
+                    elif url.startswith('https://t.me/') or url.startswith('t.me/'):
+                        # likely a channel link, but we will classify later
+                        pass
+                elif isinstance(entity, tl.types.MessageEntityTextUrl):
+                    # Text URL with a different displayed text
+                    url = entity.url
+                    all_links.add(url)
+                    if 'addstickers' in url or 't.me/addstickers' in url:
+                        sticker_links.add(url)
+                    elif url.startswith('https://t.me/') or url.startswith('t.me/'):
+                        pass
+                elif isinstance(entity, tl.types.MessageEntityMention):
+                    mention = msg.text[entity.offset:entity.offset + entity.length]
+                    all_links.add(mention)  # @username
+
+        # Also check reply_markup (inline buttons)
+        if msg.reply_markup:
+            if hasattr(msg.reply_markup, 'rows'):
+                for row in msg.reply_markup.rows:
+                    for btn in row.buttons:
+                        if hasattr(btn, 'url') and btn.url:
+                            all_links.add(btn.url)
+                            if 'addstickers' in btn.url or 't.me/addstickers' in btn.url:
+                                sticker_links.add(btn.url)
+                            elif btn.url.startswith('https://t.me/') or btn.url.startswith('t.me/'):
+                                pass
+
+    # Combine raw texts for regex-based extractions
+    combined = "".join(raw_text_parts)
+
+    # ---- Regex extractions (from combined text) ----
+
+    # Extract all URLs via regex (captures those not in entities)
+    url_pattern = r'https?://[^\s]+'
+    regex_urls = re.findall(url_pattern, combined)
+    for u in regex_urls:
+        all_links.add(u)
+        if 'addstickers' in u:
+            sticker_links.add(u)
+        elif u.startswith('https://t.me/') or u.startswith('t.me/'):
+            pass
+
+    # Extract t.me/addstickers links that might be without protocol
+    sticker_urls = re.findall(r't\.me/addstickers/[^\s]+', combined)
+    for su in sticker_urls:
+        if not su.startswith('http'):
+            su = 'https://' + su
+        all_links.add(su)
+        sticker_links.add(su)
+
+    # Separate mentions from URLs
+    mentions = re.findall(r'@[a-zA-Z0-9_]+', combined)
+    for m in mentions:
+        all_links.add(m)
+
+    # Filter out the Funstate bot start links
+    all_links = {l for l in all_links if 'Funstate_7bot?start=' not in l}
+    sticker_links = {l for l in sticker_links if 'Funstate_7bot?start=' not in l}
+
+    # ---- Classify channel link ----
+    # Look for a line like "Chαηη℮l: <link>" or a t.me link that is not a sticker pack
+    channel_match = re.search(r'Chαηη℮l:\s*(.+?)(?:\n|$)', combined)
+    if channel_match:
+        channel_text = channel_match.group(1).strip()
+        # If it's a clickable link, it might be in entities, but we also check text
+        # Try to find a t.me link in that line
+        tme_links = re.findall(r'(?:https?://)?t\.me/[a-zA-Z0-9_]+', channel_text)
+        if tme_links:
+            channel_link = tme_links[0]
+        else:
+            # Could be just a name; maybe the link is elsewhere
+            pass
+
+    # If still no channel link, pick the first non-sticker t.me link from all_links
+    if not channel_link:
+        for link in all_links:
+            if (link.startswith('https://t.me/') or link.startswith('t.me/')) and 'addstickers' not in link:
+                channel_link = link
+                break
+
+    # ---- Other extractions ----
+    # ID
+    id_match = re.search(r'IＤ:\s*(\d+)', combined)
     if id_match:
         result['id'] = id_match.group(1)
 
-    # 3. Extract usernames
-    usernames_match = re.search(r'usеrnamеѕ:\s*.*?\n\s*\|?\s*(.*?)(?:\n|$)', text, re.DOTALL)
+    # Usernames
+    usernames_match = re.search(r'usеrnamеѕ:\s*.*?\n\s*\|?\s*(.*?)(?:\n|$)', combined, re.DOTALL)
     if usernames_match:
         usernames_raw = usernames_match.group(1)
+        # Extract @mentions
         usernames = re.findall(r'@[a-zA-Z0-9_]+', usernames_raw)
-        if usernames:
-            result['usernames'] = list(set(usernames))
-        else:
+        if not usernames:
+            # fallback: split by |
             parts = [p.strip() for p in usernames_raw.split('|') if p.strip()]
-            result['usernames'] = [p for p in parts if p.startswith('@')]
+            usernames = [p for p in parts if p.startswith('@')]
+        result['usernames'] = list(set(usernames))
 
-    # 4. Extract name history
+    # Name history
     name_history = []
-    name_section = re.search(r'firsτ ηamе / łαsτ ηame:.*?(?:\n\n|\Z)', text, re.DOTALL)
+    name_section = re.search(r'firsτ ηamе / łαsτ ηame:.*?(?:\n\n|\Z)', combined, re.DOTALL)
     if name_section:
         lines = name_section.group().split('\n')
         for line in lines:
@@ -506,92 +568,105 @@ def parse_funstate_response(text):
                     date = parts[0].replace('├', '').strip()
                     name = parts[1].strip()
                     name_history.append({"date": date, "name": name})
-        result['name_history'] = name_history
+        if name_history:
+            result['name_history'] = name_history
 
-    # 5. Extract stats
+    # Stats
     stats = {}
-    div_match = re.search(r'div℮rsity\s+([\d.]+%)', text, re.IGNORECASE)
+    div_match = re.search(r'div℮rsity\s+([\d.]+%)', combined, re.IGNORECASE)
     if div_match:
         stats['message_diversity'] = div_match.group(1)
-    from_match = re.search(r'Frοm\s+([\d/]+)\s+to\s+([\d/]+)', text, re.IGNORECASE)
+
+    from_match = re.search(r'Frοm\s+([\d/]+)\s+to\s+([\d/]+)', combined, re.IGNORECASE)
     if from_match:
         stats['from_date'] = from_match.group(1)
         stats['to_date'] = from_match.group(2)
-    msg_match = re.search(r'(\d+)\s+mesѕαgеѕ\s+iη\s+(\d+)\s+ցrοuρѕ', text)
+
+    msg_match = re.search(r'(\d+)\s+mesѕαgеѕ\s+iη\s+(\d+)\s+ցrοuρѕ', combined)
     if msg_match:
         stats['total_messages'] = int(msg_match.group(1))
         stats['total_groups'] = int(msg_match.group(2))
-    replies_match = re.search(r'([\d.]+%)\s+r℮pli℮s\s+([\d.]+%)\s+mеdiα', text)
+
+    replies_match = re.search(r'([\d.]+%)\s+r℮pli℮s\s+([\d.]+%)\s+mеdiα', combined)
     if replies_match:
         stats['replies_percent'] = replies_match.group(1)
         stats['media_percent'] = replies_match.group(2)
-    circles_match = re.search(r'Cirсłeѕ:\s*(\d+),\s+voice:\s*(\d+)', text)
+
+    circles_match = re.search(r'Cirсłeѕ:\s*(\d+),\s+voice:\s*(\d+)', combined)
     if circles_match:
         stats['circles'] = int(circles_match.group(1))
         stats['voice'] = int(circles_match.group(2))
-    fav_match = re.search(r'Fαvoriτе grоuρ:\s*(.+?)(?:\n|$)', text)
+
+    fav_match = re.search(r'Fαvoriτе grоuρ:\s*(.+?)(?:\n|$)', combined)
     if fav_match:
         stats['favorite_group'] = fav_match.group(1).strip()
-    admin_match = re.search(r'Admiη iη ցrоuρѕ:\s*(\d+)', text)
+
+    admin_match = re.search(r'Admiη iη ցrоuρѕ:\s*(\d+)', combined)
     if admin_match:
         stats['admin_in_groups'] = int(admin_match.group(1))
-    sticker_match = re.search(r'Sτiсkerѕеτѕ:\s*(\d+)\s*\[Viеw\]', text)
+
+    sticker_match = re.search(r'Sτiсkerѕеτѕ:\s*(\d+)\s*\[Viеw\]', combined)
     if sticker_match:
         stats['stickersets'] = int(sticker_match.group(1))
-    # Also check for "Кηоwn ѕtiсқ℮rѕеτs" section
-    known_stickers = re.search(r'Кηоwn ѕtiсқ℮rѕеτs сreated by .*?:\s*(.*?)(?:\n|$)', text, re.DOTALL)
+
+    # Known stickersets – extract sticker pack links from the text
+    known_stickers = re.search(r'Кηоwn ѕtiсқ℮rѕеτs сreated by .*?:\s*(.*?)(?:\n|$)', combined, re.DOTALL)
     if known_stickers:
         sticker_text = known_stickers.group(1)
         sticker_urls = re.findall(r'https?://[^\s]+', sticker_text)
-        if sticker_urls:
-            if 'sticker_pack_links' not in result:
-                result['sticker_pack_links'] = []
-            result['sticker_pack_links'].extend(sticker_urls)
-    
+        for su in sticker_urls:
+            if 'addstickers' in su:
+                sticker_links.add(su)
+        # Also get t.me/addstickers links without protocol
+        sticker_urls2 = re.findall(r't\.me/addstickers/[^\s]+', sticker_text)
+        for su in sticker_urls2:
+            if not su.startswith('http'):
+                su = 'https://' + su
+            sticker_links.add(su)
+
     result['stats'] = stats
-    
-    # 6. Keep raw text
-    result['raw'] = raw
-    
+
+    # ---- Finalise links ----
+    result['links'] = list(all_links)
+    if sticker_links:
+        result['sticker_pack_links'] = list(sticker_links)
+    if channel_link:
+        result['channel_link'] = channel_link
+
+    result['raw'] = combined
     return result
 
 # ================= QUERY FUNCTIONS =================
 async def query_funstate_bot_async(client, value):
-    """Send plain value directly to Funstate bot, capture and parse its full reply."""
+    """Send plain value to Funstate bot, collect ALL reply messages and parse them."""
     if FUNSTATE_BOT_ENTITY is None:
         return {"error": "Funstate bot entity not available"}
+
     try:
         sent = await client.send_message(FUNSTATE_BOT_ENTITY, value)
     except Exception as e:
         logger.error(f"Send to Funstate error: {e}")
         return {"error": str(e)}
+
     sent_time = sent.date
     logger.info(f"📤 Sent plain '{value}' to Funstate bot at {sent_time}")
 
-    # Poll for messages until we have a complete response
+    # Collect messages for 12 seconds (enough time for the bot to send all replies)
+    await asyncio.sleep(12)
+
     all_messages = []
-    for attempt in range(30):  # up to 30 attempts
-        await asyncio.sleep(1.5)
-        # Fetch messages after sent_time
-        async for msg in client.iter_messages(FUNSTATE_BOT_ENTITY, offset_date=sent_time, limit=30):
-            if msg.sender_id == FUNSTATE_BOT_ID and msg.date > sent_time:
-                # Avoid duplicates
-                if msg.id not in [m.id for m in all_messages]:
-                    all_messages.append(msg)
-        # Check if we have a complete response (contains "ID:" or "usernames:")
-        combined = "".join([m.raw_text for m in all_messages])
-        if "IＤ:" in combined or "usеrnamеѕ:" in combined:
-            logger.info(f"Complete response found after {attempt+1} attempts")
-            break
+    async for msg in client.iter_messages(FUNSTATE_BOT_ENTITY, offset_date=sent_time, limit=50):
+        if msg.sender_id == FUNSTATE_BOT_ID and msg.date > sent_time:
+            all_messages.append(msg)
 
     if not all_messages:
         return {"error": "Funstate bot did not respond"}
 
     # Sort by date
     all_messages.sort(key=lambda m: m.date)
-    combined = "".join([m.raw_text for m in all_messages])
-    
-    parsed = parse_funstate_response(combined)
+
+    # Parse using both text and entities
+    parsed = parse_funstate_response(all_messages)
     return parsed
 
 async def query_main_bot_async(client, command_text, group):
