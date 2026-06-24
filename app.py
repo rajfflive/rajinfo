@@ -275,6 +275,15 @@ def clear_cache():
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
 
+@app.errorhandler(Exception)
+def handle_exception(e):
+    logger.error(f"Unhandled exception: {e}", exc_info=True)
+    return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+
+@app.errorhandler(404)
+def handle_404(e):
+    return jsonify({"error": "Not found"}), 404
+
 # ================= TELEGRAM ACCOUNT MANAGER =================
 accounts = []
 account_clients = {}
@@ -780,12 +789,22 @@ def parse_funstate_response(messages):
                 stats['voice'] = int(mv.group(1))
 
         # "Favorite group: Abdul Dev Official Community"
-        if not stats.get('favorite_group') and ('favor' in ll or 'fav' in ll) and 'gro' in ll:
-            ci = line.find(':')
-            if ci != -1:
-                val = line[ci+1:].strip()
+        if not stats.get('favorite_group') and ('favor' in ll or 'favourit' in ll or 'fav' in ll) and ('gro' in ll or 'grp' in ll):
+            # Handle normal colon and fullwidth colon ：
+            m = re.search(r'(?:favou?rite?\s*(?:group|grp)|fav\s*(?:group|grp))\s*[：:]\s*(.+)', line, re.IGNORECASE)
+            if m:
+                val = m.group(1).strip()
                 if val:
                     stats['favorite_group'] = val
+            else:
+                # Colon might be on same line with different format
+                for sep in ['：', ':']:
+                    ci = line.find(sep)
+                    if ci != -1:
+                        val = line[ci+1:].strip()
+                        if val:
+                            stats['favorite_group'] = val
+                            break
 
         # "Were looking for: 1"
         if not stats.get('were_looking_for') and 'look' in ll and 'for' in ll:
@@ -924,7 +943,7 @@ async def query_main_bot_async(client, command_text, group):
             unique_replies.append(msg)
     unique_replies.sort(key=lambda m: m.date)
 
-    combined = "".join([m.raw_text for m in unique_replies])
+    combined = "".join([m.raw_text or "" for m in unique_replies])
     objects = extract_json_objects(combined)
     if not objects:
         start = combined.find('{')
@@ -1058,8 +1077,12 @@ for cmd in ALL_COMMANDS:
             cached = get_cached(cmd, value)
             if cached is not None:
                 cached = finalize_response(cached)
-                cached['time_taken'] = "0.00s (cached)"
-                log_usage(request.api_key, cmd, value, json.dumps(cached), True, None)
+                if isinstance(cached, dict):
+                    cached['time_taken'] = "0.00s"
+                try:
+                    log_usage(request.api_key, cmd, value, json.dumps(cached, default=str), True, None)
+                except Exception:
+                    pass
                 add_stats(cmd, value, True)
                 return jsonify(cached)
 
@@ -1080,9 +1103,14 @@ for cmd in ALL_COMMANDS:
                     result['developer'] = DEVELOPER_TAG
                     result['tag'] = DEVELOPER_TAG
                     result['time_taken'] = elapsed
-                if "error" not in result:
+                # Only cache if result has real data (more than just developer/tag/time_taken/error)
+                meaningful_keys = set(result.keys()) - {'developer', 'tag', 'time_taken', 'error'} if isinstance(result, dict) else True
+                if isinstance(result, dict) and "error" not in result and meaningful_keys:
                     set_cache(cmd, value, result)
-                log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
+                try:
+                    log_usage(request.api_key, cmd, value, json.dumps(result, default=str), isinstance(result, dict) and 'error' not in result, None)
+                except Exception:
+                    pass
                 return jsonify(result)
             else:
                 if isinstance(result, list):
@@ -1098,7 +1126,10 @@ for cmd in ALL_COMMANDS:
                     set_cache(cmd, value, finalized)
                 elif isinstance(finalized, list):
                     set_cache(cmd, value, finalized)
-                log_usage(request.api_key, cmd, value, json.dumps(finalized), 'error' not in str(finalized), None)
+                try:
+                    log_usage(request.api_key, cmd, value, json.dumps(finalized, default=str), 'error' not in str(finalized), None)
+                except Exception:
+                    pass
                 return jsonify(finalized)
         return endpoint
     app.add_url_rule(f'/{cmd}/<value>', f'api_{cmd}', make_endpoint(cmd), methods=['GET'])
