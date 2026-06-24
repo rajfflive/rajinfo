@@ -431,7 +431,7 @@ def finalize_response(data):
     else:
         return data
 
-# ================= IMPROVED QUERY FUNCTIONS =================
+# ================= FIXED QUERY FUNCTIONS =================
 async def query_main_bot_async(client, command_text, group):
     """Send command to group and capture all bot messages after it."""
     try:
@@ -443,17 +443,15 @@ async def query_main_bot_async(client, command_text, group):
     logger.info(f"📤 Sent {command_text} to group {group.title} at {sent_time}")
 
     bot_replies = []
-    # We'll attempt to fetch messages multiple times
+    # Fetch messages multiple times to ensure we get the reply
     for attempt in range(20):
         await asyncio.sleep(1.5)
-        # Fetch messages from the group that are from bot and after sent_time
-        async for msg in client.iter_messages(group.id, offset_date=sent_time, limit=50):
+        # Fetch last 100 messages from the group without offset
+        async for msg in client.iter_messages(group.id, limit=100):
+            # Check if it's from the bot and after sent_time
             if msg.sender_id == BOT_ID and msg.date > sent_time:
-                # Check if it contains the target value (the second word of command)
-                # But we don't always know the target; we can just collect all bot messages after command
                 bot_replies.append(msg)
         if bot_replies:
-            # If we have replies, break the loop
             break
 
     if not bot_replies:
@@ -483,7 +481,7 @@ async def query_funstate_bot_async(client, value):
     bot_replies = []
     for attempt in range(20):
         await asyncio.sleep(1.5)
-        async for msg in client.iter_messages(FUNSTATE_BOT_ENTITY, offset_date=sent_time, limit=50):
+        async for msg in client.iter_messages(FUNSTATE_BOT_ENTITY, limit=100):
             if msg.sender_id == FUNSTATE_BOT_ID and msg.date > sent_time:
                 bot_replies.append(msg)
         if bot_replies:
@@ -533,7 +531,7 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
-        result = future.result(timeout=60)  # increased timeout
+        result = future.result(timeout=60)
         success = 'error' not in result
         add_stats(command_text.split()[0] if command_text else 'unknown', command_text.split()[1] if len(command_text.split()) > 1 else '', success)
         return result
