@@ -450,21 +450,98 @@ def finalize_response(data):
 
 # ================= FUNSTATE RESPONSE PARSER (FIXED) =================
 def normalize_text(text):
-    """Normalize unicode lookalike chars to ASCII for easier matching."""
+    """
+    Normalize unicode lookalike / decorative chars to plain ASCII.
+    Extended to cover all common Funstate bot output characters.
+    """
     replacements = {
-        # Cyrillic and unicode lookalikes for common letters
+        # ---- Cyrillic lookalikes ----
         'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'х': 'x',
         'А': 'A', 'Е': 'E', 'О': 'O', 'Р': 'P', 'С': 'C', 'Х': 'X',
-        '\u0430': 'a', '\u0435': 'e', '\u043e': 'o',
-        # Specific substitutions seen in Funstate output
-        'ι': 'i', 'ɑ': 'a', 'ε': 'e', 'η': 'n', 'τ': 't', 'ρ': 'p',
-        '\u03b9': 'i', '\u03b7': 'n', '\u03c4': 't',
-        # Full-width chars
-        'ＩＤ': 'ID', '\uff29\uff24': 'ID',
+        'М': 'M', 'В': 'B', 'К': 'K', 'Т': 'T',
+        'ѕ': 's',  # Cyrillic DZE (used as 's')
+        # ---- Greek lookalikes ----
+        'α': 'a', 'β': 'b', 'γ': 'y', 'δ': 'd', 'ε': 'e', 'ζ': 'z',
+        'η': 'n', 'θ': 'th', 'ι': 'i', 'κ': 'k', 'λ': 'l', 'μ': 'm',
+        'ν': 'n', 'ξ': 'x', 'ο': 'o', 'π': 'p', 'ρ': 'r', 'σ': 's',
+        'τ': 't', 'υ': 'u', 'φ': 'f', 'χ': 'x', 'ψ': 'ps', 'ω': 'o',
+        'Α': 'A', 'Β': 'B', 'Γ': 'G', 'Δ': 'D', 'Ε': 'E', 'Ζ': 'Z',
+        'Η': 'H', 'Θ': 'Th', 'Ι': 'I', 'Κ': 'K', 'Λ': 'L', 'Μ': 'M',
+        'Ν': 'N', 'Ξ': 'X', 'Ο': 'O', 'Π': 'P', 'Ρ': 'R', 'Σ': 'S',
+        'Τ': 'T', 'Υ': 'U', 'Φ': 'F', 'Χ': 'X', 'Ψ': 'Ps', 'Ω': 'O',
+        # ---- Latin extended / IPA / Unicode letter forms ----
+        'ɑ': 'a', 'ɐ': 'a', 'ɒ': 'a',
+        'ƅ': 'b', 'ƃ': 'b',
+        'ç': 'c', 'ć': 'c', 'č': 'c',
+        'ď': 'd', 'đ': 'd',
+        'è': 'e', 'é': 'e', 'ê': 'e', 'ë': 'e', 'ě': 'e',
+        '℮': 'e',   # ESTIMATED SIGN (used as 'e' in Funstate)
+        'ƒ': 'f', 'Ƒ': 'F',
+        'ĝ': 'g', 'ğ': 'g', 'ġ': 'g', 'ģ': 'g', 'ɡ': 'g', 'ᵍ': 'g',
+        'ĥ': 'h', 'ħ': 'h',
+        'ì': 'i', 'í': 'i', 'î': 'i', 'ï': 'i', 'ĩ': 'i', 'ī': 'i',
+        'ĵ': 'j',
+        'ķ': 'k', 'қ': 'k', 'ĸ': 'k',
+        'ĺ': 'l', 'ļ': 'l', 'ľ': 'l', 'ŀ': 'l', 'ł': 'l',
+        'ṁ': 'm',
+        'ñ': 'n', 'ń': 'n', 'ņ': 'n', 'ň': 'n', 'ŋ': 'n',
+        'ò': 'o', 'ó': 'o', 'ô': 'o', 'õ': 'o', 'ö': 'o', 'ø': 'o',
+        'ṗ': 'p',
+        'ŕ': 'r', 'ŗ': 'r', 'ř': 'r',
+        'ś': 's', 'ŝ': 's', 'ş': 's', 'š': 's',
+        'ţ': 't', 'ť': 't', 'ŧ': 't',
+        'ù': 'u', 'ú': 'u', 'û': 'u', 'ü': 'u', 'ũ': 'u', 'ū': 'u',
+        'ŵ': 'w',
+        'ý': 'y', 'ÿ': 'y',
+        'ź': 'z', 'ż': 'z', 'ž': 'z',
+        # ---- Small caps / modifier letters ----
+        'ᴀ': 'a', 'ʙ': 'b', 'ᴄ': 'c', 'ᴅ': 'd', 'ᴇ': 'e', 'ꜰ': 'f',
+        'ɢ': 'g', 'ʜ': 'h', 'ɪ': 'i', 'ᴊ': 'j', 'ᴋ': 'k', 'ʟ': 'l',
+        'ᴍ': 'm', 'ɴ': 'n', 'ᴏ': 'o', 'ᴘ': 'p', 'ǫ': 'q', 'ʀ': 'r',
+        'ꜱ': 's', 'ᴛ': 't', 'ᴜ': 'u', 'ᴠ': 'v', 'ᴡ': 'w', 'x': 'x',
+        'ʏ': 'y', 'ᴢ': 'z',
+        # ---- Superscript / subscript digits and letters ----
+        '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
+        '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
+        '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
+        '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9',
+        # ---- Fullwidth ASCII (Ａ-Ｚ, ａ-ｚ, ０-９) ----
+        'Ａ': 'A', 'Ｂ': 'B', 'Ｃ': 'C', 'Ｄ': 'D', 'Ｅ': 'E',
+        'Ｆ': 'F', 'Ｇ': 'G', 'Ｈ': 'H', 'Ｉ': 'I', 'Ｊ': 'J',
+        'Ｋ': 'K', 'Ｌ': 'L', 'Ｍ': 'M', 'Ｎ': 'N', 'Ｏ': 'O',
+        'Ｐ': 'P', 'Ｑ': 'Q', 'Ｒ': 'R', 'Ｓ': 'S', 'Ｔ': 'T',
+        'Ｕ': 'U', 'Ｖ': 'V', 'Ｗ': 'W', 'Ｘ': 'X', 'Ｙ': 'Y', 'Ｚ': 'Z',
+        'ａ': 'a', 'ｂ': 'b', 'ｃ': 'c', 'ｄ': 'd', 'ｅ': 'e',
+        'ｆ': 'f', 'ｇ': 'g', 'ｈ': 'h', 'ｉ': 'i', 'ｊ': 'j',
+        'ｋ': 'k', 'ｌ': 'l', 'ｍ': 'm', 'ｎ': 'n', 'ｏ': 'o',
+        'ｐ': 'p', 'ｑ': 'q', 'ｒ': 'r', 'ｓ': 's', 'ｔ': 't',
+        'ｕ': 'u', 'ｖ': 'v', 'ｗ': 'w', 'ｘ': 'x', 'ｙ': 'y', 'ｚ': 'z',
+        '０': '0', '１': '1', '２': '2', '３': '3', '４': '4',
+        '５': '5', '６': '6', '７': '7', '８': '8', '９': '9',
+        # ---- Misc symbols used by Funstate ----
+        'ᖴ': 'F',   # Canadian syllabics F (used as F in Funstate)
+        'ᴍ': 'M',
+        'ɢ': 'g',
+        'ℕ': 'N',
+        'ℤ': 'Z',
+        'ℂ': 'C',
+        'ℝ': 'R',
+        '℃': 'C',
+        'ℓ': 'l',
+        'ℱ': 'F',
+        'ℋ': 'H',
+        'ℐ': 'I',
+        'ℒ': 'L',
+        'ℳ': 'M',
+        'ℛ': 'R',
+        'ᴵ': 'I', 'ᴰ': 'D',
+        # ---- Unicode multi-char replacements (do these as string replace) ----
+        'ＩＤ': 'ID',
     }
     result = text
-    for src, dst in replacements.items():
-        result = result.replace(src, dst)
+    # Apply longer replacements first to avoid partial matches
+    for src in sorted(replacements, key=len, reverse=True):
+        result = result.replace(src, replacements[src])
     return result
 
 def extract_urls_from_message(msg):
@@ -472,7 +549,6 @@ def extract_urls_from_message(msg):
     urls = []
     text = msg.text or ""
 
-    # From text entities
     if msg.entities:
         for entity in msg.entities:
             if hasattr(entity, 'url') and entity.url:
@@ -481,7 +557,6 @@ def extract_urls_from_message(msg):
                 url = text[entity.offset:entity.offset + entity.length]
                 urls.append(('entity_url', url))
 
-    # From inline keyboard buttons (reply_markup)
     if msg.reply_markup and hasattr(msg.reply_markup, 'rows'):
         for row in msg.reply_markup.rows:
             for btn in row.buttons:
@@ -489,7 +564,6 @@ def extract_urls_from_message(msg):
                     label = btn.text if hasattr(btn, 'text') else ''
                     urls.append(('button', btn.url, label))
 
-    # From regex fallback (catches plain text URLs not in entities)
     for m in re.finditer(r'https?://[^\s<>\]\)]+', text):
         urls.append(('regex', m.group()))
     for m in re.finditer(r't\.me/[a-zA-Z0-9_+/]+', text):
@@ -503,65 +577,56 @@ def extract_urls_from_message(msg):
 def parse_funstate_response(messages):
     """
     Parse a list of Telethon Message objects from Funstate bot.
-    FIXED: properly extracts sticker pack links and channel link
-    from both text entities and inline keyboard buttons.
+    Returns a clean structured dict — no raw text, no sticker links,
+    no Funstate bot URLs.
     """
     result = {}
     raw_text_parts = []
-    sticker_links = []
     channel_link = None
-    all_urls = []
 
-    # ---- Collect everything from all messages ----
     for msg in messages:
         raw_text_parts.append(msg.raw_text or "")
-        for url_entry in extract_urls_from_message(msg):
-            all_urls.append(url_entry)
 
     combined_raw = "\n".join(raw_text_parts)
     combined_norm = normalize_text(combined_raw)
 
-    # ---- Classify collected URLs ----
+    # ---- Collect and classify URLs ----
     seen_urls = set()
-    button_urls = []       # all inline button URLs
-    sticker_set = set()    # deduplicated sticker pack links
-    tme_links = []         # non-sticker t.me links
-    external_links = []    # https:// non-t.me links
+    button_urls = []
+    sticker_set = set()
+    tme_links = []
 
-    for entry in all_urls:
-        url = entry[1] if len(entry) > 1 else ''
-        label = entry[2] if len(entry) > 2 else ''
+    for msg in messages:
+        for url_entry in extract_urls_from_message(msg):
+            url = url_entry[1] if len(url_entry) > 1 else ''
+            label = url_entry[2] if len(url_entry) > 2 else ''
 
-        # Clean up URL
-        url = url.strip().rstrip('.,;)')
-        if not url or url in seen_urls:
-            continue
-        seen_urls.add(url)
+            url = url.strip().rstrip('.,;)')
+            if not url:
+                continue
 
-        # Skip Funstate bot start/deep links
-        if 'Funstate_7bot' in url:
-            continue
+            # FIX: skip Funstate bot URLs BEFORE adding to seen_urls
+            if FUNSTATE_BOT_USERNAME.lower() in url.lower():
+                continue
 
-        if entry[0] == 'button':
-            button_urls.append((url, label))
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
 
-        # Classify
-        is_sticker = ('addstickers' in url) or ('/addstickers/' in url)
-        is_tme = 't.me/' in url or url.startswith('@')
+            if url_entry[0] == 'button':
+                button_urls.append((url, label))
 
-        if is_sticker:
-            if not url.startswith('http'):
-                url = 'https://' + url
-            sticker_set.add(url)
-        elif is_tme and not is_sticker:
-            tme_links.append(url)
-        elif url.startswith('http'):
-            external_links.append(url)
+            is_sticker = 'addstickers' in url or '/addstickers/' in url
+            is_tme = 't.me/' in url or url.startswith('@')
 
-    sticker_links = list(sticker_set)
+            if is_sticker:
+                if not url.startswith('http'):
+                    url = 'https://' + url
+                sticker_set.add(url)
+            elif is_tme:
+                tme_links.append(url)
 
     # ---- Channel link detection ----
-    # Strategy 1: Find "Channel:" label in a button
     for url, label in button_urls:
         norm_label = normalize_text(label).lower()
         if 'channel' in norm_label or 'chan' in norm_label:
@@ -569,14 +634,10 @@ def parse_funstate_response(messages):
                 channel_link = url
                 break
 
-    # Strategy 2: Find the line in text that mentions channel, get nearest entity URL
     if not channel_link:
-        # Match channel line using flexible unicode-aware pattern
-        # Funstate uses mixed unicode chars so we normalize first
         for line in combined_norm.split('\n'):
             line_norm = line.lower()
-            if re.search(r'ch[a@][nη][nη][e℮][l]', line_norm) or 'channel' in line_norm:
-                # Look for a t.me link on this same line
+            if re.search(r'ch[a@][nn][e][l]', line_norm) or 'channel' in line_norm:
                 tme_in_line = re.findall(r'(?:https?://)?t\.me/[a-zA-Z0-9_]+', line)
                 if tme_in_line:
                     u = tme_in_line[0]
@@ -585,36 +646,31 @@ def parse_funstate_response(messages):
                     if 'addstickers' not in u:
                         channel_link = u
                         break
-                # Look for @username on this line
                 at_in_line = re.findall(r'@[a-zA-Z0-9_]+', line)
                 if at_in_line:
                     channel_link = 'https://t.me/' + at_in_line[0].lstrip('@')
                     break
 
-    # Strategy 3: Fallback — first non-sticker t.me link from buttons
     if not channel_link:
         for url, label in button_urls:
             if 'addstickers' not in url and 't.me/' in url:
                 channel_link = url
                 break
 
-    # Strategy 4: Final fallback — first non-sticker t.me link overall
     if not channel_link and tme_links:
         channel_link = tme_links[0]
 
     # ---- ID extraction ----
-    id_match = re.search(r'(?:ID|ΙD|ＩＤ|iD)[:\s]*(\d{5,})', combined_norm, re.IGNORECASE)
+    id_match = re.search(r'(?:ID|iD)[:\s]*(\d{5,})', combined_norm, re.IGNORECASE)
     if id_match:
         result['id'] = id_match.group(1)
 
     # ---- Username extraction ----
-    # The "usernames:" section
     usernames = []
     uname_section_match = re.search(r'usernames?:?\s*\n?\s*\|?\s*(.+?)(?:\n\n|\n[^\|@])', combined_norm, re.IGNORECASE | re.DOTALL)
     if uname_section_match:
         uname_text = uname_section_match.group(1)
         usernames = list(set(re.findall(r'@[a-zA-Z0-9_]+', uname_text)))
-    # Also scan full combined for @usernames not already found
     all_at = re.findall(r'@[a-zA-Z0-9_]{4,}', combined_raw)
     for u in all_at:
         if u not in usernames and u.lower() not in ('@' + FUNSTATE_BOT_USERNAME.lower(), '@' + BOT_USERNAME.lower()):
@@ -637,11 +693,11 @@ def parse_funstate_response(messages):
     if name_history:
         result['name_history'] = name_history
 
-    # ---- Stats ----
+    # ---- Stats (uses normalized text for reliable regex matching) ----
     stats = {}
     norm = combined_norm
 
-    div_match = re.search(r'diversity\s+([\d.]+%)', norm, re.IGNORECASE)
+    div_match = re.search(r'divers\w*\s+([\d.]+%)', norm, re.IGNORECASE)
     if div_match:
         stats['message_diversity'] = div_match.group(1)
 
@@ -650,30 +706,30 @@ def parse_funstate_response(messages):
         stats['from_date'] = from_match.group(1)
         stats['to_date'] = from_match.group(2)
 
-    msg_match = re.search(r'(\d+)\s+messages?\s+in\s+(\d+)\s+groups?', norm, re.IGNORECASE)
+    msg_match = re.search(r'(\d+)\s+mess\w*\s+in\s+(\d+)\s+gro\w+', norm, re.IGNORECASE)
     if msg_match:
         stats['total_messages'] = int(msg_match.group(1))
         stats['total_groups'] = int(msg_match.group(2))
 
-    replies_match = re.search(r'([\d.]+%)\s+replies\s+([\d.]+%)\s+media', norm, re.IGNORECASE)
+    replies_match = re.search(r'([\d.]+%)\s+repli\w*\s+([\d.]+%)\s+med\w+', norm, re.IGNORECASE)
     if replies_match:
         stats['replies_percent'] = replies_match.group(1)
         stats['media_percent'] = replies_match.group(2)
 
-    circles_match = re.search(r'circles?:\s*(\d+).*?voice:\s*(\d+)', norm, re.IGNORECASE)
+    circles_match = re.search(r'circ\w*:\s*(\d+)[^\n]*?voice:\s*(\d+)', norm, re.IGNORECASE)
     if circles_match:
         stats['circles'] = int(circles_match.group(1))
         stats['voice'] = int(circles_match.group(2))
 
-    fav_match = re.search(r'favorite\s+group:\s*(.+?)(?:\n|$)', norm, re.IGNORECASE)
+    fav_match = re.search(r'favor\w*\s+gro\w+:\s*(.+?)(?:\n|$)', norm, re.IGNORECASE)
     if fav_match:
         stats['favorite_group'] = fav_match.group(1).strip()
 
-    looking_match = re.search(r'were?\s+looking?\s+for:\s*(\d+)', norm, re.IGNORECASE)
+    looking_match = re.search(r'were?\s+look\w*\s+for:\s*(\d+)', norm, re.IGNORECASE)
     if looking_match:
         stats['were_looking_for'] = int(looking_match.group(1))
 
-    admin_match = re.search(r'admin\s+in\s+groups?:\s*(\d+)', norm, re.IGNORECASE)
+    admin_match = re.search(r'admin\s+in\s+gro\w+:\s*(\d+)', norm, re.IGNORECASE)
     if admin_match:
         stats['admin_in_groups'] = int(admin_match.group(1))
 
@@ -681,14 +737,13 @@ def parse_funstate_response(messages):
     if sticker_count_match:
         stats['stickersets_count'] = int(sticker_count_match.group(1))
 
-    result['stats'] = stats
+    if stats:
+        result['stats'] = stats
 
-    # ---- Channel info from text ----
-    # Extract channel name from the Channel: line (raw text for the display name)
+    # ---- Channel display name from text ----
     for line in combined_raw.split('\n'):
         line_norm = normalize_text(line).lower()
-        if re.search(r'ch[a@][nη][nη][e℮]?[l]?', line_norm) or 'channel' in line_norm:
-            # Get everything after the colon
+        if 'channel' in line_norm:
             colon_idx = line.find(':')
             if colon_idx != -1:
                 channel_name_raw = line[colon_idx + 1:].strip()
@@ -696,26 +751,16 @@ def parse_funstate_response(messages):
                     result['channel_name'] = channel_name_raw
                     break
 
-    # ---- Finalize links ----
-    if sticker_links:
-        result['sticker_pack_links'] = sticker_links
-
     if channel_link:
         result['channel_link'] = channel_link
 
-    # All collected links for reference
-    result['all_links'] = list(seen_urls - sticker_set - ({channel_link} if channel_link else set()))
-
-    result['raw'] = combined_raw
+    # NOTE: 'raw', 'all_links', and 'sticker_pack_links' intentionally omitted
     return result
 
 # ================= QUERY FUNCTIONS =================
 async def query_funstate_bot_async(client, value):
     """
     Send plain value to Funstate bot, collect ALL reply messages and parse them.
-    - Resolves bot entity fresh per-client (avoids InvalidPeer with round-robin).
-    - Uses min_id to find messages AFTER our sent message (offset_date goes backwards, don't use it).
-    - Polls every 2s for up to 20s so we return as soon as bot replies.
     """
     try:
         funstate_entity = await client.get_entity(FUNSTATE_BOT_USERNAME)
@@ -733,9 +778,8 @@ async def query_funstate_bot_async(client, value):
     sent_id = sent.id
     logger.info(f"📤 Sent '{value}' to Funstate (msg_id={sent_id})")
 
-    # Poll for bot response — min_id ensures we only get messages AFTER what we sent
     all_messages = []
-    for attempt in range(10):           # up to 10 attempts × 2s = 20s max
+    for attempt in range(10):
         await asyncio.sleep(2)
         async for msg in client.iter_messages(funstate_entity, min_id=sent_id, limit=30):
             if msg.sender_id == funstate_bot_id:
@@ -815,7 +859,6 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
     Query with round-robin across ALL active accounts.
     If one account fails (InvalidPeer, timeout, etc.), automatically tries the next.
     """
-    # Admin-level guards (no account needed)
     if bot_type == "funstate":
         if get_global_setting('funstate_enabled') != '1':
             return {"error": "Funstate commands are disabled by admin"}
@@ -862,15 +905,11 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
 
         if isinstance(result, dict) and 'error' in result:
             err_msg = result['error']
-            # Peer/session errors → try next account
             if any(kw in err_msg for kw in ['Peer', 'peer', 'invalid', 'Invalid', 'flood', 'Flood', 'banned', 'Banned']):
                 last_error = err_msg
                 logger.warning(f"⚠️ Account '{acc['name']}' peer/flood error: {err_msg} — trying next")
                 continue
-            # Bot didn't respond → don't retry (same result on other accounts)
-            # unless it's a peer error embedded differently
-        
-        # Advance round-robin index to this account's position
+
         global account_index
         try:
             account_index = accounts.index(acc)
@@ -885,7 +924,6 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
         update_account_last_used(acc_id)
         return result
 
-    # All accounts exhausted
     add_stats('all_failed', '', False)
     return {"error": last_error, "developer": DEVELOPER_TAG}
 
@@ -1019,8 +1057,6 @@ ADMIN_HTML = """
         .badge-green { background: #064e3b; color: #34d399; }
         .badge-red { background: #450a0a; color: #f87171; }
         .badge-blue { background: #0c2a4a; color: #38bdf8; }
-
-        /* Toggle Switch */
         .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #334155; }
         .toggle-row:last-child { border-bottom: none; }
         .toggle-label { font-size: 14px; color: #cbd5e1; }
@@ -1031,7 +1067,6 @@ ADMIN_HTML = """
         .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: .25s; }
         input:checked + .slider { background: #0ea5e9; }
         input:checked + .slider:before { transform: translateX(20px); }
-
         .section-divider { border: none; border-top: 1px solid #334155; margin: 24px 0; }
         .top-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
         .top-bar-title { font-size: 22px; font-weight: 700; color: #f1f5f9; }
@@ -1237,7 +1272,6 @@ ADMIN_HTML = """
         <form method="POST" action="/admin/toggle_command">
             <div class="card">
                 <h2>Groups &amp; Bots</h2>
-
                 <div class="toggle-row">
                     <div>
                         <div class="toggle-label">Users X Info Group (Special Commands)</div>
@@ -1248,7 +1282,6 @@ ADMIN_HTML = """
                         <span class="slider"></span>
                     </label>
                 </div>
-
                 <div class="toggle-row">
                     <div>
                         <div class="toggle-label">Funstate Bot (/funstate &amp; /names)</div>
@@ -1260,11 +1293,9 @@ ADMIN_HTML = """
                     </label>
                 </div>
             </div>
-
             <div class="card">
                 <h2>Special Commands</h2>
                 <p style="font-size:13px;color:#64748b;margin-bottom:16px;">These run in the Users X Info group. Disabling a command returns an error to API callers.</p>
-
                 {% for cmd in special_commands %}
                 <div class="toggle-row">
                     <div>
@@ -1277,7 +1308,6 @@ ADMIN_HTML = """
                 </div>
                 {% endfor %}
             </div>
-
             <div class="card">
                 <h2>Delete Delay</h2>
                 <p style="font-size:13px;color:#64748b;margin-bottom:12px;">Seconds to wait before deleting bot messages from group.</p>
@@ -1286,7 +1316,6 @@ ADMIN_HTML = """
                     <span style="color:#64748b;font-size:13px;">seconds</span>
                 </div>
             </div>
-
             <button type="submit" class="btn btn-primary" style="margin-top:4px;">Save All Settings</button>
         </form>
     </div>
