@@ -20,8 +20,7 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 PERMANENT_KEY = "felix_unlimited_2024"
 DEVELOPER_TAG = "@rajfflive"
 CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
-MAX_RESULTS = 10
-DELETE_DELAY = 10
+MAX_RESULTS = 4
 
 GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
 GROUP_OTHER_NAME = "TGTOINFO"
@@ -35,7 +34,7 @@ FUNSTATE_BOT_ID = None
 FUNSTATE_BOT_ENTITY = None
 SPECIAL_COMMANDS = ["upiinfo", "fam", "family", "pan", "tg", "leak"]
 
-# ================= DATABASE (unchanged) =================
+# ================= DATABASE =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -81,13 +80,16 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS global_settings
                  (key TEXT PRIMARY KEY,
                   value TEXT)''')
-    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('vip_commands_enabled', '1')")
-    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('delete_delay', ?)", (str(DELETE_DELAY),))
+    # Initialize all command toggles to 1 (enabled)
+    for cmd in SPECIAL_COMMANDS:
+        c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES (?, '1')", (f"cmd_{cmd}_enabled",))
+    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('funstate_enabled', '1')")
+    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('delete_delay', '10')")
     conn.commit()
     conn.close()
 init_db()
 
-# ---------- DB HELPERS (unchanged) ----------
+# ---------- DB HELPERS ----------
 def get_global_setting(key):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -431,41 +433,7 @@ def finalize_response(data):
     else:
         return data
 
-# ================= FIXED QUERY FUNCTIONS =================
-async def query_main_bot_async(client, command_text, group):
-    """Send command to group and capture all bot messages after it."""
-    try:
-        sent = await client.send_message(group.id, command_text)
-    except Exception as e:
-        logger.error(f"Send error: {e}")
-        return {"error": str(e)}
-    sent_time = sent.date
-    logger.info(f"📤 Sent {command_text} to group {group.title} at {sent_time}")
-
-    bot_replies = []
-    # Fetch messages multiple times to ensure we get the reply
-    for attempt in range(20):
-        await asyncio.sleep(1.5)
-        # Fetch last 100 messages from the group without offset
-        async for msg in client.iter_messages(group.id, limit=100):
-            # Check if it's from the bot and after sent_time
-            if msg.sender_id == BOT_ID and msg.date > sent_time:
-                bot_replies.append(msg)
-        if bot_replies:
-            break
-
-    if not bot_replies:
-        return {"error": "Bot did not respond"}
-
-    # Sort by date (oldest first)
-    bot_replies.sort(key=lambda m: m.date)
-    combined = "".join([m.raw_text for m in bot_replies])
-    objects = extract_json_objects(combined)
-    if objects:
-        return objects
-    else:
-        return {"info": combined}
-
+# ================= QUERY FUNCTIONS =================
 async def query_funstate_bot_async(client, value):
     """Send plain value directly to Funstate bot and capture its reply."""
     if FUNSTATE_BOT_ENTITY is None:
@@ -508,8 +476,8 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
         return {"error": "Event loop not found"}
 
     if bot_type == "funstate":
-        if get_global_setting('vip_commands_enabled') != '1':
-            return {"error": "VIP commands are disabled by admin"}
+        if get_global_setting('funstate_enabled') != '1':
+            return {"error": "Funstate commands are disabled by admin"}
 
         async def do_query():
             try:
@@ -524,14 +492,64 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
 
         async def do_query():
             try:
-                return await query_main_bot_async(client, command_text, group)
+                sent = await client.send_message(group.id, command_text)
+                msg_id = sent.id
+                logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.title}")
+
+                bot_replies = []
+                for attempt in range(20):
+                    await asyncio.sleep(1.5)
+                    async for msg in client.iter_messages(group.id, limit=200):
+                        if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
+                            bot_replies.append(msg)
+                            logger.info(f"📩 Found reply (attempt {attempt+1})")
+                        elif msg.sender_id == BOT_ID and command_text.split()[1] in msg.raw_text:
+                            bot_replies.append(msg)
+                            logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
+                    if bot_replies:
+                        break
+
+                if not bot_replies:
+                    await client.delete_messages(group.id, [msg_id])
+                    return {"error": "Bot did not respond"}
+
+                seen = set()
+                unique_replies = []
+                for msg in bot_replies:
+                    if msg.id not in seen:
+                        seen.add(msg.id)
+                        unique_replies.append(msg)
+                unique_replies.sort(key=lambda m: m.date)
+
+                combined = "".join([m.raw_text for m in unique_replies])
+                objects = extract_json_objects(combined)
+                if not objects:
+                    start = combined.find('{')
+                    end = combined.rfind('}')
+                    if start != -1 and end != -1 and end > start:
+                        try:
+                            single = json.loads(combined[start:end+1])
+                            objects = [single]
+                        except:
+                            pass
+                if not objects:
+                    await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
+                    return {"error": "No valid JSON found"}
+
+                to_delete = [msg_id] + [m.id for m in unique_replies]
+                await client.delete_messages(group.id, to_delete)
+                logger.info(f"🗑️ Deleted {len(to_delete)} messages")
+                if len(objects) == 1:
+                    return finalize_response(objects[0])
+                else:
+                    return finalize_response(objects)
             except Exception as e:
                 logger.error(f"Query error: {e}")
                 return {"error": str(e)}
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
-        result = future.result(timeout=60)
+        result = future.result(timeout=50)
         success = 'error' not in result
         add_stats(command_text.split()[0] if command_text else 'unknown', command_text.split()[1] if len(command_text.split()) > 1 else '', success)
         return result
@@ -587,8 +605,13 @@ for cmd in ALL_COMMANDS:
                 return jsonify(cached)
 
             if cmd in ("funstate", "names"):
+                if get_global_setting('funstate_enabled') != '1':
+                    return jsonify({"error": "Funstate commands are disabled by admin"})
                 result = query_bot_sync(value, None, bot_type="funstate")
             else:
+                # Check if this specific special command is enabled
+                if cmd in SPECIAL_COMMANDS and get_global_setting(f"cmd_{cmd}_enabled") == '0':
+                    return jsonify({"error": f"Command /{cmd} is disabled by admin"})
                 group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
                 result = query_bot_sync(f"/{cmd} {value}", group_type)
             if isinstance(result, list):
@@ -611,7 +634,7 @@ def statu_endpoint():
     add_stats("statu", "", 'error' not in result)
     return jsonify(result)
 
-# ================= ADMIN PANEL (unchanged) =================
+# ================= ADMIN PANEL =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -735,19 +758,24 @@ ADMIN_HTML = """
         <p><strong>❌ Failed:</strong> {{ stats.fail }}</p>
     </div>
     <div id="settings" class="panel" style="display:none;">
-        <h2>Settings</h2>
-        <h3>VIP Commands (/funstate, /names)</h3>
-        <form method="POST" action="/admin/toggle_vip">
-            <label>Enable VIP Commands:</label>
-            <select name="vip_enabled">
-                <option value="1" {% if vip_enabled == '1' %}selected{% endif %}>ON</option>
-                <option value="0" {% if vip_enabled == '0' %}selected{% endif %}>OFF</option>
-            </select>
-            <button type="submit" class="success">Update</button>
+        <h2>Command Toggles</h2>
+        <form method="POST" action="/admin/toggle_command">
+            <h3>Special Commands (Main Group)</h3>
+            {% for cmd in special_commands %}
+            <label>
+                <input type="checkbox" name="{{ cmd }}" value="1" {% if cmd_status[cmd] == '1' %}checked{% endif %}>
+                /{{ cmd }}
+            </label><br>
+            {% endfor %}
+            <h3>Funstate Commands (/funstate, /names)</h3>
+            <label>
+                <input type="checkbox" name="funstate" value="1" {% if funstate_enabled == '1' %}checked{% endif %}>
+                Enable Funstate endpoints
+            </label><br>
+            <button type="submit" class="success">Update Toggles</button>
         </form>
         <hr>
-        <h3>Delete Delay (seconds)</h3>
-        <p>Current delay: {{ delete_delay }}s</p>
+        <h3>Delete Delay</h3>
         <form method="POST" action="/admin/set_delete_delay">
             <input type="number" name="delete_delay" value="{{ delete_delay }}" min="5" max="60">
             <button type="submit" class="success">Update</button>
@@ -787,8 +815,12 @@ def admin_dashboard():
     logs = get_usage_logs(100)
     total, success, fail = get_stats()
     stats = {"total": total, "success": success, "fail": fail}
-    vip_enabled = get_global_setting('vip_commands_enabled') or '1'
-    delete_delay = get_global_setting('delete_delay') or str(DELETE_DELAY)
+    # Gather command statuses
+    cmd_status = {}
+    for cmd in SPECIAL_COMMANDS:
+        cmd_status[cmd] = get_global_setting(f"cmd_{cmd}_enabled") or '1'
+    funstate_enabled = get_global_setting('funstate_enabled') or '1'
+    delete_delay = get_global_setting('delete_delay') or '10'
     return render_template_string(ADMIN_HTML,
                                  keys=keys,
                                  accounts=accounts,
@@ -801,20 +833,25 @@ def admin_dashboard():
                                  bot_id=BOT_ID,
                                  funstate_bot_id=FUNSTATE_BOT_ID,
                                  stats=stats,
-                                 vip_enabled=vip_enabled,
+                                 special_commands=SPECIAL_COMMANDS,
+                                 cmd_status=cmd_status,
+                                 funstate_enabled=funstate_enabled,
                                  delete_delay=delete_delay)
 
-@app.route('/admin/toggle_vip', methods=['POST'])
+@app.route('/admin/toggle_command', methods=['POST'])
 @admin_login_required
-def admin_toggle_vip():
-    enabled = request.form.get('vip_enabled', '1')
-    set_global_setting('vip_commands_enabled', enabled)
+def admin_toggle_command():
+    for cmd in SPECIAL_COMMANDS:
+        val = '1' if request.form.get(cmd) == '1' else '0'
+        set_global_setting(f"cmd_{cmd}_enabled", val)
+    funstate_val = '1' if request.form.get('funstate') == '1' else '0'
+    set_global_setting('funstate_enabled', funstate_val)
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/set_delete_delay', methods=['POST'])
 @admin_login_required
 def admin_set_delete_delay():
-    delay = request.form.get('delete_delay', str(DELETE_DELAY))
+    delay = request.form.get('delete_delay', '10')
     set_global_setting('delete_delay', delay)
     return redirect(url_for('admin_dashboard'))
 
