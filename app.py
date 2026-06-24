@@ -21,7 +21,7 @@ PERMANENT_KEY = "felix_unlimited_2024"
 DEVELOPER_TAG = "@rajfflive"
 CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
 MAX_RESULTS = 10
-DELETE_DELAY = 10  # seconds before deleting messages (to avoid spam)
+DELETE_DELAY = 10
 
 GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
 GROUP_OTHER_NAME = "TGTOINFO"
@@ -367,7 +367,7 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= JSON EXTRACTION =================
+# ================= JSON EXTRACTION (for main bot) =================
 def extract_json_objects(text, limit=MAX_RESULTS):
     objects = []
     i = 0
@@ -430,29 +430,19 @@ def finalize_response(data):
         return data
 
 # ================= QUERY FUNCTIONS =================
-async def query_bot_async(client, bot_id, command_text, group_id=None):
-    """Generic query to any bot in any chat."""
-    if group_id:
-        sent = await client.send_message(group_id, command_text)
-    else:
-        sent = await client.send_message(bot_id, command_text)
+async def query_main_bot_async(client, command_text, group):
+    """Send command to the main bot in a group and capture reply."""
+    sent = await client.send_message(group, command_text)
     msg_id = sent.id
-    logger.info(f"📤 Sent {command_text} to bot {bot_id}")
+    logger.info(f"📤 Sent {command_text} to group {group.title}")
 
     bot_replies = []
     for attempt in range(20):
         await asyncio.sleep(1.5)
-        if group_id:
-            chat_id = group_id
-        else:
-            chat_id = bot_id
-        async for msg in client.iter_messages(chat_id, limit=200):
-            if msg.sender_id == bot_id and msg.reply_to_msg_id == msg_id:
+        async for msg in client.iter_messages(group, limit=200):
+            if msg.sender_id == BOT_ID and (msg.reply_to_msg_id == msg_id or command_text in msg.raw_text):
                 bot_replies.append(msg)
                 logger.info(f"📩 Found reply (attempt {attempt+1})")
-            elif msg.sender_id == bot_id and command_text in msg.raw_text:
-                bot_replies.append(msg)
-                logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
         if bot_replies:
             break
 
@@ -469,35 +459,25 @@ async def query_bot_async(client, bot_id, command_text, group_id=None):
 
     combined = "".join([m.raw_text for m in unique_replies])
     objects = extract_json_objects(combined)
-    if not objects:
-        start = combined.find('{')
-        end = combined.rfind('}')
-        if start != -1 and end != -1 and end > start:
-            try:
-                single = json.loads(combined[start:end+1])
-                objects = [single]
-            except:
-                pass
-    if not objects:
+    if objects:
+        return objects
+    else:
         return {"info": combined}
-    return objects
 
 async def query_funstate_bot_async(client, value):
-    """Query Funstate bot with plain username/ID."""
+    """Send plain value directly to @Funstate_7bot and capture its reply."""
     sent = await client.send_message(FUNSTATE_BOT_USERNAME, value)
     msg_id = sent.id
-    logger.info(f"📤 Sent plain '{value}' to Funstate bot")
+    logger.info(f"📤 Sent plain '{value}' directly to Funstate bot")
 
     bot_replies = []
     for attempt in range(20):
         await asyncio.sleep(1.5)
+        # Fetch messages from the bot's chat (the bot is the chat)
         async for msg in client.iter_messages(FUNSTATE_BOT_USERNAME, limit=200):
-            if msg.sender_id == FUNSTATE_BOT_ID and msg.reply_to_msg_id == msg_id:
+            if msg.sender_id == FUNSTATE_BOT_ID and (msg.reply_to_msg_id == msg_id or value in msg.raw_text):
                 bot_replies.append(msg)
                 logger.info(f"📩 Found reply (attempt {attempt+1})")
-            elif msg.sender_id == FUNSTATE_BOT_ID and value in msg.raw_text:
-                bot_replies.append(msg)
-                logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
         if bot_replies:
             break
 
@@ -513,11 +493,8 @@ async def query_funstate_bot_async(client, value):
     unique_replies.sort(key=lambda m: m.date)
 
     combined = "".join([m.raw_text for m in unique_replies])
-    objects = extract_json_objects(combined)
-    if objects:
-        return objects
-    else:
-        return {"info": combined}
+    # Return the full raw text as info (could contain newlines, emojis)
+    return {"info": combined}
 
 # ================= MAIN QUERY FUNCTION =================
 def query_bot_sync(command_text, group_type, bot_type="main"):
@@ -533,10 +510,11 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
         return {"error": "Event loop not found"}
 
     if bot_type == "funstate":
+        if get_global_setting('vip_commands_enabled') != '1':
+            return {"error": "VIP commands are disabled by admin"}
+
         async def do_query():
             try:
-                if get_global_setting('vip_commands_enabled') != '1':
-                    return {"error": "VIP commands are currently disabled by admin"}
                 return await query_funstate_bot_async(client, command_text)
             except Exception as e:
                 logger.error(f"Funstate query error: {e}")
@@ -548,7 +526,7 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
 
         async def do_query():
             try:
-                return await query_bot_async(client, BOT_ID, command_text, group.id)
+                return await query_main_bot_async(client, command_text, group)
             except Exception as e:
                 logger.error(f"Query error: {e}")
                 return {"error": str(e)}
@@ -611,7 +589,6 @@ for cmd in ALL_COMMANDS:
                 return jsonify(cached)
 
             if cmd in ("funstate", "names"):
-                # Both use the same funstate bot query
                 result = query_bot_sync(value, None, bot_type="funstate")
             else:
                 group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
@@ -636,7 +613,7 @@ def statu_endpoint():
     add_stats("statu", "", 'error' not in result)
     return jsonify(result)
 
-# ================= ADMIN PANEL =================
+# ================= ADMIN PANEL (with VIP toggle) =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -761,9 +738,9 @@ ADMIN_HTML = """
     </div>
     <div id="settings" class="panel" style="display:none;">
         <h2>Settings</h2>
-        <h3>VIP Commands</h3>
+        <h3>VIP Commands (/funstate, /names)</h3>
         <form method="POST" action="/admin/toggle_vip">
-            <label>Enable VIP Commands (Funstate bot):</label>
+            <label>Enable VIP Commands:</label>
             <select name="vip_enabled">
                 <option value="1" {% if vip_enabled == '1' %}selected{% endif %}>ON</option>
                 <option value="0" {% if vip_enabled == '0' %}selected{% endif %}>OFF</option>
