@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import asyncio
 import sqlite3
 import secrets
@@ -80,7 +81,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS global_settings
                  (key TEXT PRIMARY KEY,
                   value TEXT)''')
-    # Initialize all command toggles to 1 (enabled)
     for cmd in SPECIAL_COMMANDS:
         c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES (?, '1')", (f"cmd_{cmd}_enabled",))
     c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('funstate_enabled', '1')")
@@ -433,9 +433,106 @@ def finalize_response(data):
     else:
         return data
 
+# ================= FUNSTATE RESPONSE PARSER =================
+def parse_funstate_response(text):
+    """Parse the Funstate bot response into a structured JSON object."""
+    result = {}
+    
+    # 1. Extract ID
+    id_match = re.search(r'ΙＤ:\s*(\d+)', text)
+    if id_match:
+        result['id'] = id_match.group(1)
+    
+    # 2. Extract usernames
+    usernames_match = re.search(r'ᴜѕеrηαmеѕ:.*?\n\|\s*(.*?)(?:\n|$)', text, re.DOTALL)
+    if usernames_match:
+        usernames = [u.strip() for u in usernames_match.group(1).split('|') if u.strip()]
+        result['usernames'] = usernames
+    
+    # 3. Extract name history
+    name_history = []
+    name_section = re.search(r'firsτ ηαm℮ / ⅼαsτ ηαmе:.*?(?:\n\n|\Z)', text, re.DOTALL)
+    if name_section:
+        lines = name_section.group().split('\n')
+        for line in lines:
+            if '├' in line and '➜' in line:
+                parts = line.split('➜')
+                if len(parts) == 2:
+                    date = parts[0].replace('├', '').strip()
+                    name = parts[1].strip()
+                    name_history.append({"date": date, "name": name})
+        result['name_history'] = name_history
+    
+    # 4. Extract stats
+    stats = {}
+    
+    # Message diversity
+    div_match = re.search(r'Меѕѕαց℮ diversity\s+([\d.]+%)', text)
+    if div_match:
+        stats['message_diversity'] = div_match.group(1)
+    
+    # From/To dates
+    from_match = re.search(r'ᖴrоm\s+([\d/]+)\s+τо\s+([\d/]+)', text)
+    if from_match:
+        stats['from_date'] = from_match.group(1)
+        stats['to_date'] = from_match.group(2)
+    
+    # Total messages and groups
+    msg_match = re.search(r'(\d+)\s+meѕѕaցеѕ\s+in\s+(\d+)\s+groᴜρѕ', text)
+    if msg_match:
+        stats['total_messages'] = int(msg_match.group(1))
+        stats['total_groups'] = int(msg_match.group(2))
+    
+    # Replies and media percentages
+    replies_match = re.search(r'([\d.]+%)\s+r℮ρliеѕ\s+([\d.]+%)\s+mediα', text)
+    if replies_match:
+        stats['replies_percent'] = replies_match.group(1)
+        stats['media_percent'] = replies_match.group(2)
+    
+    # Circles and voice
+    circles_match = re.search(r'Cirсłeѕ:\s*(\d+),\s+vоiс℮:\s*(\d+)', text)
+    if circles_match:
+        stats['circles'] = int(circles_match.group(1))
+        stats['voice'] = int(circles_match.group(2))
+    
+    # Favorite group
+    fav_match = re.search(r'Favоrit℮ grоuρ:\s*(.+?)(?:\n|$)', text)
+    if fav_match:
+        stats['favorite_group'] = fav_match.group(1).strip()
+    
+    # Admin in groups
+    admin_match = re.search(r'Admiη iη ցrоᴜpѕ:\s*(\d+)', text)
+    if admin_match:
+        stats['admin_in_groups'] = int(admin_match.group(1))
+    
+    # Stickersets
+    sticker_match = re.search(r'Sτiскerѕeτѕ:\s*(\d+)\s*\[Vi℮w\]', text)
+    if sticker_match:
+        stats['stickersets'] = int(sticker_match.group(1))
+    
+    result['stats'] = stats
+    
+    # 5. Extract any clickable links (URLs, @mentions)
+    links = []
+    # Find URLs
+    urls = re.findall(r'https?://[^\s]+', text)
+    links.extend(urls)
+    # Find @mentions (but exclude the ones already in usernames)
+    mentions = re.findall(r'@[a-zA-Z0-9_]+', text)
+    for m in mentions:
+        if m not in result.get('usernames', []):
+            links.append(m)
+    if links:
+        result['links'] = list(set(links))
+    
+    # 6. Keep raw text for reference
+    result['raw'] = text
+    
+    return result
+
 # ================= QUERY FUNCTIONS =================
 async def query_funstate_bot_async(client, value):
-    """Send plain value directly to Funstate bot and capture its reply."""
+    """Send plain value directly to Funstate bot, capture and parse its reply."""
     if FUNSTATE_BOT_ENTITY is None:
         return {"error": "Funstate bot entity not available"}
     try:
@@ -447,7 +544,7 @@ async def query_funstate_bot_async(client, value):
     logger.info(f"📤 Sent plain '{value}' to Funstate bot at {sent_time}")
 
     bot_replies = []
-    for attempt in range(20):
+    for attempt in range(25):
         await asyncio.sleep(1.5)
         async for msg in client.iter_messages(FUNSTATE_BOT_ENTITY, limit=100):
             if msg.sender_id == FUNSTATE_BOT_ID and msg.date > sent_time:
@@ -460,7 +557,68 @@ async def query_funstate_bot_async(client, value):
 
     bot_replies.sort(key=lambda m: m.date)
     combined = "".join([m.raw_text for m in bot_replies])
-    return {"info": combined}
+    
+    # Parse the response into structured data
+    parsed = parse_funstate_response(combined)
+    return parsed
+
+async def query_main_bot_async(client, command_text, group):
+    """Send command to main bot in a group and capture reply."""
+    try:
+        sent = await client.send_message(group.id, command_text)
+    except Exception as e:
+        logger.error(f"Send error: {e}")
+        return {"error": str(e)}
+    msg_id = sent.id
+    logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.title}")
+
+    bot_replies = []
+    for attempt in range(20):
+        await asyncio.sleep(1.5)
+        async for msg in client.iter_messages(group.id, limit=200):
+            if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
+                bot_replies.append(msg)
+                logger.info(f"📩 Found reply (attempt {attempt+1})")
+            elif msg.sender_id == BOT_ID and command_text.split()[1] in msg.raw_text:
+                bot_replies.append(msg)
+                logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
+        if bot_replies:
+            break
+
+    if not bot_replies:
+        await client.delete_messages(group.id, [msg_id])
+        return {"error": "Bot did not respond"}
+
+    seen = set()
+    unique_replies = []
+    for msg in bot_replies:
+        if msg.id not in seen:
+            seen.add(msg.id)
+            unique_replies.append(msg)
+    unique_replies.sort(key=lambda m: m.date)
+
+    combined = "".join([m.raw_text for m in unique_replies])
+    objects = extract_json_objects(combined)
+    if not objects:
+        start = combined.find('{')
+        end = combined.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            try:
+                single = json.loads(combined[start:end+1])
+                objects = [single]
+            except:
+                pass
+    if not objects:
+        await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
+        return {"error": "No valid JSON found"}
+
+    to_delete = [msg_id] + [m.id for m in unique_replies]
+    await client.delete_messages(group.id, to_delete)
+    logger.info(f"🗑️ Deleted {len(to_delete)} messages")
+    if len(objects) == 1:
+        return finalize_response(objects[0])
+    else:
+        return finalize_response(objects)
 
 # ================= MAIN QUERY FUNCTION =================
 def query_bot_sync(command_text, group_type, bot_type="main"):
@@ -492,57 +650,7 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
 
         async def do_query():
             try:
-                sent = await client.send_message(group.id, command_text)
-                msg_id = sent.id
-                logger.info(f"📤 Sent {command_text} (msg_id: {msg_id}) to group {group.title}")
-
-                bot_replies = []
-                for attempt in range(20):
-                    await asyncio.sleep(1.5)
-                    async for msg in client.iter_messages(group.id, limit=200):
-                        if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
-                            bot_replies.append(msg)
-                            logger.info(f"📩 Found reply (attempt {attempt+1})")
-                        elif msg.sender_id == BOT_ID and command_text.split()[1] in msg.raw_text:
-                            bot_replies.append(msg)
-                            logger.info(f"📩 Found fallback reply (attempt {attempt+1})")
-                    if bot_replies:
-                        break
-
-                if not bot_replies:
-                    await client.delete_messages(group.id, [msg_id])
-                    return {"error": "Bot did not respond"}
-
-                seen = set()
-                unique_replies = []
-                for msg in bot_replies:
-                    if msg.id not in seen:
-                        seen.add(msg.id)
-                        unique_replies.append(msg)
-                unique_replies.sort(key=lambda m: m.date)
-
-                combined = "".join([m.raw_text for m in unique_replies])
-                objects = extract_json_objects(combined)
-                if not objects:
-                    start = combined.find('{')
-                    end = combined.rfind('}')
-                    if start != -1 and end != -1 and end > start:
-                        try:
-                            single = json.loads(combined[start:end+1])
-                            objects = [single]
-                        except:
-                            pass
-                if not objects:
-                    await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
-                    return {"error": "No valid JSON found"}
-
-                to_delete = [msg_id] + [m.id for m in unique_replies]
-                await client.delete_messages(group.id, to_delete)
-                logger.info(f"🗑️ Deleted {len(to_delete)} messages")
-                if len(objects) == 1:
-                    return finalize_response(objects[0])
-                else:
-                    return finalize_response(objects)
+                return await query_main_bot_async(client, command_text, group)
             except Exception as e:
                 logger.error(f"Query error: {e}")
                 return {"error": str(e)}
@@ -609,19 +717,30 @@ for cmd in ALL_COMMANDS:
                     return jsonify({"error": "Funstate commands are disabled by admin"})
                 result = query_bot_sync(value, None, bot_type="funstate")
             else:
-                # Check if this specific special command is enabled
                 if cmd in SPECIAL_COMMANDS and get_global_setting(f"cmd_{cmd}_enabled") == '0':
                     return jsonify({"error": f"Command /{cmd} is disabled by admin"})
                 group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
                 result = query_bot_sync(f"/{cmd} {value}", group_type)
-            if isinstance(result, list):
-                finalized = [finalize_response(item) for item in result]
+            
+            # For funstate/names, result is already parsed; for others, finalize it
+            if cmd in ("funstate", "names"):
+                # Already parsed, just ensure developer tag
+                if isinstance(result, dict):
+                    result['developer'] = DEVELOPER_TAG
+                    result['tag'] = DEVELOPER_TAG
+                if "error" not in result:
+                    set_cache(cmd, value, result)
+                log_usage(request.api_key, cmd, value, json.dumps(result), 'error' not in result, None)
+                return jsonify(result)
             else:
-                finalized = finalize_response(result)
-            if "error" not in finalized:
-                set_cache(cmd, value, finalized)
-            log_usage(request.api_key, cmd, value, json.dumps(finalized), 'error' not in finalized, None)
-            return jsonify(finalized)
+                if isinstance(result, list):
+                    finalized = [finalize_response(item) for item in result]
+                else:
+                    finalized = finalize_response(result)
+                if "error" not in finalized:
+                    set_cache(cmd, value, finalized)
+                log_usage(request.api_key, cmd, value, json.dumps(finalized), 'error' not in finalized, None)
+                return jsonify(finalized)
         return endpoint
     app.add_url_rule(f'/{cmd}/<value>', f'api_{cmd}', make_endpoint(cmd), methods=['GET'])
 
@@ -815,7 +934,6 @@ def admin_dashboard():
     logs = get_usage_logs(100)
     total, success, fail = get_stats()
     stats = {"total": total, "success": success, "fail": fail}
-    # Gather command statuses
     cmd_status = {}
     for cmd in SPECIAL_COMMANDS:
         cmd_status[cmd] = get_global_setting(f"cmd_{cmd}_enabled") or '1'
