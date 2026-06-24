@@ -32,9 +32,10 @@ GROUP_MAIN = None
 GROUP_OTHER = None
 BOT_ID = None
 FUNSTATE_BOT_ID = None
+FUNSTATE_BOT_ENTITY = None
 SPECIAL_COMMANDS = ["upiinfo", "fam", "family", "pan", "tg", "leak"]
 
-# ================= DATABASE =================
+# ================= DATABASE (unchanged) =================
 DB_FILE = "felix_api.db"
 
 def init_db():
@@ -284,7 +285,7 @@ def get_next_account():
     return accounts[account_index]
 
 async def start_account(account_data):
-    global GROUP_MAIN, GROUP_OTHER, BOT_ID, FUNSTATE_BOT_ID
+    global GROUP_MAIN, GROUP_OTHER, BOT_ID, FUNSTATE_BOT_ID, FUNSTATE_BOT_ENTITY
     acc_id = account_data['id']
     api_id = account_data['api_id']
     api_hash = account_data['api_hash']
@@ -322,6 +323,7 @@ async def start_account(account_data):
     try:
         funstate_entity = await client.get_entity(FUNSTATE_BOT_USERNAME)
         FUNSTATE_BOT_ID = funstate_entity.id
+        FUNSTATE_BOT_ENTITY = funstate_entity
         logger.info(f"✅ Funstate Bot ID: {FUNSTATE_BOT_ID}")
     except:
         logger.warning(f"⚠️ Could not fetch Funstate bot {FUNSTATE_BOT_USERNAME}")
@@ -367,7 +369,7 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= JSON EXTRACTION (for main bot) =================
+# ================= JSON EXTRACTION =================
 def extract_json_objects(text, limit=MAX_RESULTS):
     objects = []
     i = 0
@@ -431,16 +433,20 @@ def finalize_response(data):
 
 # ================= QUERY FUNCTIONS =================
 async def query_main_bot_async(client, command_text, group):
-    """Send command to the main bot in a group and capture reply."""
-    sent = await client.send_message(group, command_text)
+    """Send command to main bot in a group and capture reply."""
+    try:
+        sent = await client.send_message(group.id, command_text)
+    except Exception as e:
+        logger.error(f"Send error: {e}")
+        return {"error": str(e)}
     msg_id = sent.id
     logger.info(f"📤 Sent {command_text} to group {group.title}")
 
     bot_replies = []
-    for attempt in range(20):
+    for attempt in range(25):
         await asyncio.sleep(1.5)
-        async for msg in client.iter_messages(group, limit=200):
-            if msg.sender_id == BOT_ID and (msg.reply_to_msg_id == msg_id or command_text in msg.raw_text):
+        async for msg in client.iter_messages(group.id, limit=200):
+            if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
                 bot_replies.append(msg)
                 logger.info(f"📩 Found reply (attempt {attempt+1})")
         if bot_replies:
@@ -465,17 +471,23 @@ async def query_main_bot_async(client, command_text, group):
         return {"info": combined}
 
 async def query_funstate_bot_async(client, value):
-    """Send plain value directly to @Funstate_7bot and capture its reply."""
-    sent = await client.send_message(FUNSTATE_BOT_USERNAME, value)
+    """Send plain value directly to Funstate bot and capture its reply."""
+    if FUNSTATE_BOT_ENTITY is None:
+        return {"error": "Funstate bot entity not available"}
+    try:
+        sent = await client.send_message(FUNSTATE_BOT_ENTITY, value)
+    except Exception as e:
+        logger.error(f"Send to Funstate error: {e}")
+        return {"error": str(e)}
     msg_id = sent.id
-    logger.info(f"📤 Sent plain '{value}' directly to Funstate bot")
+    logger.info(f"📤 Sent plain '{value}' to Funstate bot")
 
     bot_replies = []
-    for attempt in range(20):
+    for attempt in range(25):
         await asyncio.sleep(1.5)
-        # Fetch messages from the bot's chat (the bot is the chat)
-        async for msg in client.iter_messages(FUNSTATE_BOT_USERNAME, limit=200):
-            if msg.sender_id == FUNSTATE_BOT_ID and (msg.reply_to_msg_id == msg_id or value in msg.raw_text):
+        # Fetch messages from the bot's chat (the bot itself)
+        async for msg in client.iter_messages(FUNSTATE_BOT_ENTITY, limit=200):
+            if msg.sender_id == FUNSTATE_BOT_ID and msg.reply_to_msg_id == msg_id:
                 bot_replies.append(msg)
                 logger.info(f"📩 Found reply (attempt {attempt+1})")
         if bot_replies:
@@ -493,7 +505,7 @@ async def query_funstate_bot_async(client, value):
     unique_replies.sort(key=lambda m: m.date)
 
     combined = "".join([m.raw_text for m in unique_replies])
-    # Return the full raw text as info (could contain newlines, emojis)
+    # Return the raw text (could be multi-line)
     return {"info": combined}
 
 # ================= MAIN QUERY FUNCTION =================
@@ -613,7 +625,7 @@ def statu_endpoint():
     add_stats("statu", "", 'error' not in result)
     return jsonify(result)
 
-# ================= ADMIN PANEL (with VIP toggle) =================
+# ================= ADMIN PANEL =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
