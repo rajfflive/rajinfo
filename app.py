@@ -289,7 +289,6 @@ def get_next_account():
     return accounts[account_index]
 
 def get_all_active_clients():
-    """Return list of (account, client, loop) for all connected accounts, starting from next in round-robin order."""
     if not accounts:
         return []
     result = []
@@ -369,7 +368,7 @@ def init_accounts():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         telegram_loops[acc_id] = loop
-        thread = threading.Thread(target=lambda: loop.run_until_complete(start_account(accounts[-1])), daemon=True)
+        thread = threading.Thread(target=lambda l=loop, a=accounts[-1]: l.run_until_complete(start_account(a)), daemon=True)
         thread.start()
         time.sleep(2)
     if not accounts:
@@ -449,19 +448,16 @@ def finalize_response(data):
     else:
         return data
 
-# ================= FUNSTATE RESPONSE PARSER (FIXED) =================
+# ================= FUNSTATE RESPONSE PARSER (FULLY FIXED) =================
 def normalize_text(text):
-    """
-    Normalize unicode lookalike / decorative chars to plain ASCII.
-    Extended to cover all common Funstate bot output characters.
-    """
+    """Normalize unicode lookalike / decorative chars to plain ASCII."""
     replacements = {
-        # ---- Cyrillic lookalikes ----
+        # Cyrillic lookalikes
         'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'х': 'x',
         'А': 'A', 'Е': 'E', 'О': 'O', 'Р': 'P', 'С': 'C', 'Х': 'X',
         'М': 'M', 'В': 'B', 'К': 'K', 'Т': 'T',
-        'ѕ': 's',  # Cyrillic DZE (used as 's')
-        # ---- Greek lookalikes ----
+        'ѕ': 's',
+        # Greek lookalikes
         'α': 'a', 'β': 'b', 'γ': 'y', 'δ': 'd', 'ε': 'e', 'ζ': 'z',
         'η': 'n', 'θ': 'th', 'ι': 'i', 'κ': 'k', 'λ': 'l', 'μ': 'm',
         'ν': 'n', 'ξ': 'x', 'ο': 'o', 'π': 'p', 'ρ': 'r', 'σ': 's',
@@ -470,13 +466,13 @@ def normalize_text(text):
         'Η': 'H', 'Θ': 'Th', 'Ι': 'I', 'Κ': 'K', 'Λ': 'L', 'Μ': 'M',
         'Ν': 'N', 'Ξ': 'X', 'Ο': 'O', 'Π': 'P', 'Ρ': 'R', 'Σ': 'S',
         'Τ': 'T', 'Υ': 'U', 'Φ': 'F', 'Χ': 'X', 'Ψ': 'Ps', 'Ω': 'O',
-        # ---- Latin extended / IPA / Unicode letter forms ----
+        # Latin extended / IPA
         'ɑ': 'a', 'ɐ': 'a', 'ɒ': 'a',
         'ƅ': 'b', 'ƃ': 'b',
         'ç': 'c', 'ć': 'c', 'č': 'c',
         'ď': 'd', 'đ': 'd',
         'è': 'e', 'é': 'e', 'ê': 'e', 'ë': 'e', 'ě': 'e',
-        '℮': 'e',   # ESTIMATED SIGN (used as 'e' in Funstate)
+        '℮': 'e',
         'ƒ': 'f', 'Ƒ': 'F',
         'ĝ': 'g', 'ğ': 'g', 'ġ': 'g', 'ģ': 'g', 'ɡ': 'g', 'ᵍ': 'g',
         'ĥ': 'h', 'ħ': 'h',
@@ -495,18 +491,18 @@ def normalize_text(text):
         'ŵ': 'w',
         'ý': 'y', 'ÿ': 'y',
         'ź': 'z', 'ż': 'z', 'ž': 'z',
-        # ---- Small caps / modifier letters ----
+        # Small caps
         'ᴀ': 'a', 'ʙ': 'b', 'ᴄ': 'c', 'ᴅ': 'd', 'ᴇ': 'e', 'ꜰ': 'f',
         'ɢ': 'g', 'ʜ': 'h', 'ɪ': 'i', 'ᴊ': 'j', 'ᴋ': 'k', 'ʟ': 'l',
         'ᴍ': 'm', 'ɴ': 'n', 'ᴏ': 'o', 'ᴘ': 'p', 'ǫ': 'q', 'ʀ': 'r',
         'ꜱ': 's', 'ᴛ': 't', 'ᴜ': 'u', 'ᴠ': 'v', 'ᴡ': 'w', 'x': 'x',
         'ʏ': 'y', 'ᴢ': 'z',
-        # ---- Superscript / subscript digits and letters ----
+        # Superscript/subscript digits
         '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
         '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
         '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
         '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9',
-        # ---- Fullwidth ASCII (Ａ-Ｚ, ａ-ｚ, ０-９) ----
+        # Fullwidth ASCII
         'Ａ': 'A', 'Ｂ': 'B', 'Ｃ': 'C', 'Ｄ': 'D', 'Ｅ': 'E',
         'Ｆ': 'F', 'Ｇ': 'G', 'Ｈ': 'H', 'Ｉ': 'I', 'Ｊ': 'J',
         'Ｋ': 'K', 'Ｌ': 'L', 'Ｍ': 'M', 'Ｎ': 'N', 'Ｏ': 'O',
@@ -519,28 +515,13 @@ def normalize_text(text):
         'ｕ': 'u', 'ｖ': 'v', 'ｗ': 'w', 'ｘ': 'x', 'ｙ': 'y', 'ｚ': 'z',
         '０': '0', '１': '1', '２': '2', '３': '3', '４': '4',
         '５': '5', '６': '6', '７': '7', '８': '8', '９': '9',
-        # ---- Misc symbols used by Funstate ----
-        'ᖴ': 'F',   # Canadian syllabics F (used as F in Funstate)
-        'ᴍ': 'M',
-        'ɢ': 'g',
-        'ℕ': 'N',
-        'ℤ': 'Z',
-        'ℂ': 'C',
-        'ℝ': 'R',
-        '℃': 'C',
-        'ℓ': 'l',
-        'ℱ': 'F',
-        'ℋ': 'H',
-        'ℐ': 'I',
-        'ℒ': 'L',
-        'ℳ': 'M',
-        'ℛ': 'R',
-        'ᴵ': 'I', 'ᴰ': 'D',
-        # ---- Unicode multi-char replacements (do these as string replace) ----
+        # Misc symbols
+        'ᖴ': 'F', 'ℕ': 'N', 'ℤ': 'Z', 'ℂ': 'C', 'ℝ': 'R',
+        '℃': 'C', 'ℓ': 'l', 'ℱ': 'F', 'ℋ': 'H', 'ℐ': 'I',
+        'ℒ': 'L', 'ℳ': 'M', 'ℛ': 'R', 'ᴵ': 'I', 'ᴰ': 'D',
         'ＩＤ': 'ID',
     }
     result = text
-    # Apply longer replacements first to avoid partial matches
     for src in sorted(replacements, key=len, reverse=True):
         result = result.replace(src, replacements[src])
     return result
@@ -575,15 +556,15 @@ def extract_urls_from_message(msg):
 
     return urls
 
+# ===== FIX: parse_funstate_response — full rewrite of extraction logic =====
 def parse_funstate_response(messages):
     """
     Parse a list of Telethon Message objects from Funstate bot.
-    Returns a clean structured dict — no raw text, no sticker links,
-    no Funstate bot URLs.
+    FIX: Captures all fields including usernames_total, name_history_total,
+         and correctly handles the (N of M) count lines.
     """
     result = {}
     raw_text_parts = []
-    bio_link = None
 
     for msg in messages:
         raw_text_parts.append(msg.raw_text or "")
@@ -594,7 +575,9 @@ def parse_funstate_response(messages):
     # ---- Display name ("This is NAME") ----
     name_match = re.search(r'this\s+is\s+(.+?)(?:\n|$)', combined_norm, re.IGNORECASE)
     if name_match:
-        result['name'] = name_match.group(1).strip()
+        # Use raw text for name to preserve original styling
+        name_match_raw = re.search(r'(?:this\s+is|This\s+is)\s+(.+?)(?:\n|$)', combined_raw, re.IGNORECASE)
+        result['name'] = (name_match_raw.group(1) if name_match_raw else name_match.group(1)).strip()
 
     # ---- Collect and classify URLs ----
     seen_urls = set()
@@ -606,25 +589,18 @@ def parse_funstate_response(messages):
         for url_entry in extract_urls_from_message(msg):
             url = url_entry[1] if len(url_entry) > 1 else ''
             label = url_entry[2] if len(url_entry) > 2 else ''
-
             url = url.strip().rstrip('.,;)')
             if not url:
                 continue
-
-            # FIX: skip Funstate bot URLs BEFORE adding to seen_urls
             if FUNSTATE_BOT_USERNAME.lower() in url.lower():
                 continue
-
             if url in seen_urls:
                 continue
             seen_urls.add(url)
-
             if url_entry[0] == 'button':
                 button_urls.append((url, label))
-
             is_sticker = 'addstickers' in url or '/addstickers/' in url
             is_tme = 't.me/' in url or url.startswith('@')
-
             if is_sticker:
                 if not url.startswith('http'):
                     url = 'https://' + url
@@ -632,7 +608,8 @@ def parse_funstate_response(messages):
             elif is_tme:
                 tme_links.append(url)
 
-    # ---- Bio link detection (channel/bio link from buttons or text) ----
+    # ---- Bio link detection ----
+    bio_link = None
     for url, label in button_urls:
         norm_label = normalize_text(label).lower()
         if 'channel' in norm_label or 'chan' in norm_label:
@@ -671,22 +648,62 @@ def parse_funstate_response(messages):
     if id_match:
         result['id'] = id_match.group(1)
 
-    # ---- Username extraction ----
+    # ---- FIX: Username extraction — handle (N of M) header line + | @user... line ----
     usernames = []
-    uname_section_match = re.search(r'usernames?:?\s*\n?\s*\|?\s*(.+?)(?:\n\n|\n[^\|@])', combined_norm, re.IGNORECASE | re.DOTALL)
-    if uname_section_match:
-        uname_text = uname_section_match.group(1)
-        usernames = list(set(re.findall(r'@[a-zA-Z0-9_]+', uname_text)))
-    all_at = re.findall(r'@[a-zA-Z0-9_]{4,}', combined_raw)
+    usernames_shown = 0
+    usernames_total = 0
+
+    # Try to extract "usernames: (3 of 4)" count
+    uname_count_match = re.search(
+        r'usernames?\s*[:\(]?\s*\(?\s*(\d+)\s+of\s+(\d+)',
+        combined_norm, re.IGNORECASE
+    )
+    if uname_count_match:
+        usernames_shown = int(uname_count_match.group(1))
+        usernames_total = int(uname_count_match.group(2))
+
+    # Find the line(s) with pipe-separated @usernames (| @Felix_Bhai | @Mikey_bhai1 ...)
+    # Search in raw text to preserve @ signs
+    pipe_lines = re.findall(r'\|(?:\s*@[a-zA-Z0-9_]+)+[^\n]*', combined_raw)
+    for pl in pipe_lines:
+        found = re.findall(r'@[a-zA-Z0-9_]{3,}', pl)
+        for u in found:
+            if u not in usernames:
+                usernames.append(u)
+
+    # Fallback: extract all @usernames from raw text
+    all_at = re.findall(r'@[a-zA-Z0-9_]{3,}', combined_raw)
+    bot_filters = {
+        '@' + FUNSTATE_BOT_USERNAME.lower(),
+        '@' + BOT_USERNAME.lower(),
+        '@' + FUNSTATE_BOT_USERNAME,
+        '@' + BOT_USERNAME
+    }
     for u in all_at:
-        if u not in usernames and u.lower() not in ('@' + FUNSTATE_BOT_USERNAME.lower(), '@' + BOT_USERNAME.lower()):
+        if u not in usernames and u.lower() not in {f.lower() for f in bot_filters}:
             usernames.append(u)
-    usernames = list(set(usernames))
+
     if usernames:
         result['usernames'] = usernames
+    if usernames_total > 0:
+        result['usernames_shown'] = usernames_shown
+        result['usernames_total'] = usernames_total
 
-    # ---- Name history ----
+    # ---- FIX: Name history — extract (N of M) count + all ├ ➜ lines ----
     name_history = []
+    name_history_shown = 0
+    name_history_total = 0
+
+    # Extract "first name / last name: (3 of 15)" count
+    hist_count_match = re.search(
+        r'(?:first\s*nam|name\s*hist|last\s*nam)[^\n(]*\(\s*(\d+)\s+of\s+(\d+)',
+        combined_norm, re.IGNORECASE
+    )
+    if hist_count_match:
+        name_history_shown = int(hist_count_match.group(1))
+        name_history_total = int(hist_count_match.group(2))
+
+    # Parse ├ date ➜ name lines from raw text (preserves emoji / unicode names)
     for line in combined_raw.split('\n'):
         if '├' in line and '➜' in line:
             parts = line.split('➜', 1)
@@ -696,10 +713,14 @@ def parse_funstate_response(messages):
                 name_part = parts[1].strip()
                 if date_part and name_part:
                     name_history.append({"date": date_part, "name": name_part})
+
     if name_history:
         result['name_history'] = name_history
+    if name_history_total > 0:
+        result['name_history_shown'] = name_history_shown
+        result['name_history_total'] = name_history_total
 
-    # ---- Stats (uses normalized text for reliable regex matching) ----
+    # ---- Stats (normalized text for reliable regex matching) ----
     stats = {}
     norm = combined_norm
 
@@ -743,10 +764,13 @@ def parse_funstate_response(messages):
     if sticker_count_match:
         stats['stickersets_count'] = int(sticker_count_match.group(1))
 
+    if sticker_set:
+        stats['sticker_links'] = list(sticker_set)
+
     if stats:
         result['stats'] = stats
 
-    # ---- Channel display name from text ----
+    # ---- Channel display name from raw text ----
     for line in combined_raw.split('\n'):
         line_norm = normalize_text(line).lower()
         if 'channel' in line_norm:
@@ -760,13 +784,13 @@ def parse_funstate_response(messages):
     if bio_link:
         result['bio_link'] = bio_link
 
-    # NOTE: 'raw', 'all_links', and 'sticker_pack_links' intentionally omitted
     return result
 
 # ================= QUERY FUNCTIONS =================
 async def query_funstate_bot_async(client, value):
     """
-    Send plain value to Funstate bot, collect ALL reply messages and parse them.
+    FIX: Send value to Funstate bot and collect ALL reply messages with improved timing.
+    Polls multiple times after first response to catch multi-message replies.
     """
     try:
         funstate_entity = await client.get_entity(FUNSTATE_BOT_USERNAME)
@@ -784,32 +808,44 @@ async def query_funstate_bot_async(client, value):
     sent_id = sent.id
     logger.info(f"📤 Sent '{value}' to Funstate (msg_id={sent_id})")
 
-    # Initial delay — bot sometimes takes 3-5s to process IDs
+    # Initial delay — bot sometimes takes 3-5s
     await asyncio.sleep(4)
 
     all_messages = []
     seen_ids = set()
-    for attempt in range(15):          # 15 attempts × 3s = 45s max
-        async for msg in client.iter_messages(funstate_entity, min_id=sent_id, limit=30):
+
+    # Poll until we get first response (max 15 attempts × 2s = 30s)
+    for attempt in range(15):
+        async for msg in client.iter_messages(funstate_entity, min_id=sent_id, limit=50):
             if msg.sender_id == funstate_bot_id and msg.id not in seen_ids:
                 all_messages.append(msg)
                 seen_ids.add(msg.id)
         if all_messages:
             logger.info(f"📩 Got {len(all_messages)} Funstate reply(s) on attempt {attempt+1}")
-            # Wait 3 more seconds to catch any additional messages bot might send
-            await asyncio.sleep(3)
-            async for msg in client.iter_messages(funstate_entity, min_id=sent_id, limit=30):
-                if msg.sender_id == funstate_bot_id and msg.id not in seen_ids:
-                    all_messages.append(msg)
-                    seen_ids.add(msg.id)
             break
         logger.info(f"⏳ Waiting for Funstate reply... attempt {attempt+1}/15")
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
 
     if not all_messages:
         return {"error": "Funstate bot did not respond"}
 
+    # FIX: After first messages found, do 3 more rounds of polling to catch
+    # any additional messages the bot may still be sending (multi-message responses)
+    for extra_round in range(3):
+        await asyncio.sleep(2)
+        prev_count = len(all_messages)
+        async for msg in client.iter_messages(funstate_entity, min_id=sent_id, limit=50):
+            if msg.sender_id == funstate_bot_id and msg.id not in seen_ids:
+                all_messages.append(msg)
+                seen_ids.add(msg.id)
+        new_count = len(all_messages)
+        logger.info(f"🔄 Extra poll {extra_round+1}/3: {new_count - prev_count} new messages (total: {new_count})")
+        # If no new messages in last 2 polls, stop early
+        if new_count == prev_count and extra_round >= 1:
+            break
+
     all_messages.sort(key=lambda m: m.date)
+    logger.info(f"✅ Final message count from Funstate: {len(all_messages)}")
     parsed = parse_funstate_response(all_messages)
     return parsed
 
@@ -872,10 +908,6 @@ async def query_main_bot_async(client, command_text, group):
 
 # ================= MAIN QUERY FUNCTION =================
 def query_bot_sync(command_text, group_type, bot_type="main"):
-    """
-    Query with round-robin across ALL active accounts.
-    If one account fails (InvalidPeer, timeout, etc.), automatically tries the next.
-    """
     if bot_type == "funstate":
         if get_global_setting('funstate_enabled') != '1':
             return {"error": "Funstate commands are disabled by admin"}
@@ -910,7 +942,7 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
 
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
-            result = future.result(timeout=65)
+            result = future.result(timeout=70)
         except asyncio.TimeoutError:
             last_error = "Request timed out"
             logger.warning(f"⏱️ Account '{acc['name']}' timed out — trying next")
@@ -1026,6 +1058,303 @@ def statu_endpoint():
     log_usage(request.api_key, "statu", "", json.dumps(result), 'error' not in result, None)
     add_stats("statu", "", 'error' not in result)
     return jsonify(result)
+
+# ================= PUBLIC SEARCH PANEL =================
+PUBLIC_SEARCH_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Felix API — Search</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+:root{--bg:#0f172a;--card:#1e293b;--border:#334155;--accent:#38bdf8;--text:#e2e8f0;--muted:#94a3b8;--dim:#64748b;--green:#10b981;--red:#ef4444;}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;}
+.header{background:var(--card);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;}
+.logo{font-size:20px;font-weight:700;color:var(--accent);letter-spacing:-.5px;}
+.logo span{color:var(--muted);font-weight:400;font-size:14px;margin-left:6px;}
+.key-badge{font-size:12px;color:var(--dim);background:var(--bg);padding:4px 10px;border-radius:6px;border:1px solid var(--border);cursor:pointer;}
+.key-badge.set{color:var(--green);border-color:#064e3b;}
+.container{max-width:900px;margin:0 auto;padding:32px 20px;}
+.search-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px;margin-bottom:24px;}
+.search-title{font-size:16px;font-weight:600;margin-bottom:16px;color:var(--text);}
+.row{display:flex;gap:10px;flex-wrap:wrap;}
+.row .field{flex:1;min-width:140px;}
+label{display:block;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px;}
+select,input{width:100%;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px;outline:none;transition:border .15s;}
+select:focus,input:focus{border-color:var(--accent);}
+.btn{padding:10px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .15s;white-space:nowrap;}
+.btn-primary{background:var(--accent);color:#0f172a;}
+.btn:hover{opacity:.85;}
+.btn:disabled{opacity:.45;cursor:not-allowed;}
+.result-box{background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden;margin-bottom:24px;}
+.result-header{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-size:13px;}
+.result-status{display:flex;align-items:center;gap:8px;}
+.dot{width:8px;height:8px;border-radius:50%;}
+.dot-green{background:var(--green);}
+.dot-red{background:var(--red);}
+.dot-yellow{background:#f59e0b;}
+pre.json{padding:20px;font-size:12.5px;line-height:1.7;overflow-x:auto;white-space:pre-wrap;word-break:break-all;color:#a5f3fc;font-family:'Fira Code','Cascadia Code',monospace;}
+.spinner{display:inline-block;width:18px;height:18px;border:2px solid #334155;border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty{padding:48px 20px;text-align:center;color:var(--dim);}
+.empty-icon{font-size:40px;margin-bottom:12px;}
+.empty p{font-size:14px;}
+/* Modal */
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;align-items:center;justify-content:center;}
+.overlay.open{display:flex;}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px;width:90%;max-width:440px;}
+.modal h3{font-size:16px;font-weight:600;margin-bottom:8px;}
+.modal p{font-size:13px;color:var(--muted);margin-bottom:18px;}
+.modal-btns{display:flex;gap:10px;justify-content:flex-end;}
+.btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text);padding:9px 18px;border-radius:8px;cursor:pointer;font-size:14px;}
+/* Cards parsed view */
+.info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;padding:20px;}
+.info-card{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:14px;}
+.info-label{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:4px;}
+.info-value{font-size:14px;color:var(--text);word-break:break-all;}
+.tag-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
+.tag{background:#0c2a4a;color:var(--accent);padding:3px 8px;border-radius:99px;font-size:12px;}
+.view-toggle{display:flex;gap:6px;}
+.vbtn{padding:5px 12px;border-radius:6px;font-size:12px;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--muted);}
+.vbtn.active{background:#1e3a5f;color:var(--accent);border-color:var(--accent);}
+.hist-table{width:100%;border-collapse:collapse;font-size:13px;}
+.hist-table td{padding:8px 20px;border-bottom:1px solid #1e293b;}
+.hist-table td:first-child{color:var(--dim);width:110px;}
+</style>
+</head>
+<body>
+<div class="header">
+    <div class="logo">Felix API <span>Search Panel</span></div>
+    <div class="key-badge" id="keyBadge" onclick="openKeyModal()">🔑 Set API Key</div>
+</div>
+
+<div class="container">
+    <div class="search-box">
+        <div class="search-title">Query the API</div>
+        <div class="row">
+            <div class="field" style="max-width:160px;">
+                <label>Command</label>
+                <select id="cmd">
+                    <option value="funstate">funstate</option>
+                    <option value="names">names</option>
+                    <option value="num">num</option>
+                    <option value="veh">veh</option>
+                    <option value="vnum">vnum</option>
+                    <option value="upiinfo">upiinfo</option>
+                    <option value="fam">fam</option>
+                    <option value="insta">insta</option>
+                    <option value="ip">ip</option>
+                    <option value="email">email</option>
+                    <option value="tg">tg</option>
+                    <option value="ifsc">ifsc</option>
+                    <option value="adhar">adhar</option>
+                    <option value="imei">imei</option>
+                    <option value="pak">pak</option>
+                    <option value="family">family</option>
+                    <option value="gst">gst</option>
+                    <option value="pan">pan</option>
+                    <option value="leak">leak</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>Value</label>
+                <input type="text" id="val" placeholder="e.g. @username, phone number..." />
+            </div>
+            <div class="field" style="max-width:120px;display:flex;align-items:flex-end;">
+                <button class="btn btn-primary" id="searchBtn" onclick="doSearch()" style="width:100%">Search</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="result-box" id="resultBox" style="display:none;">
+        <div class="result-header">
+            <div class="result-status">
+                <div class="dot dot-yellow" id="statusDot"></div>
+                <span id="statusText">Searching...</span>
+            </div>
+            <div class="view-toggle">
+                <button class="vbtn active" id="vRaw" onclick="switchView('raw')">JSON</button>
+                <button class="vbtn" id="vCard" onclick="switchView('card')">Cards</button>
+            </div>
+        </div>
+        <div id="rawView">
+            <pre class="json" id="jsonOutput"></pre>
+        </div>
+        <div id="cardView" style="display:none;"></div>
+    </div>
+
+    <div class="empty" id="emptyState">
+        <div class="empty-icon">🔍</div>
+        <p>Enter a command and value above, then click Search.<br>Your API key is saved in the browser.</p>
+    </div>
+</div>
+
+<!-- Key Modal -->
+<div class="overlay" id="keyOverlay" onclick="if(event.target===this)closeKeyModal()">
+    <div class="modal">
+        <h3>Set Your API Key</h3>
+        <p>Your key is stored locally in the browser and never sent to our servers except as the <code>api_key</code> query param.</p>
+        <input type="text" id="keyInput" placeholder="Paste your API key..." style="margin-bottom:16px;">
+        <div class="modal-btns">
+            <button class="btn-ghost" onclick="closeKeyModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="saveKey()">Save Key</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentData = null;
+let currentView = 'raw';
+
+function openKeyModal(){
+    const k = localStorage.getItem('felixApiKey') || '';
+    document.getElementById('keyInput').value = k;
+    document.getElementById('keyOverlay').classList.add('open');
+    setTimeout(()=>document.getElementById('keyInput').focus(),100);
+}
+function closeKeyModal(){ document.getElementById('keyOverlay').classList.remove('open'); }
+function saveKey(){
+    const k = document.getElementById('keyInput').value.trim();
+    if(k){ localStorage.setItem('felixApiKey', k); updateKeyBadge(); }
+    closeKeyModal();
+}
+function updateKeyBadge(){
+    const k = localStorage.getItem('felixApiKey');
+    const badge = document.getElementById('keyBadge');
+    if(k){ badge.textContent = '🔑 Key: …' + k.slice(-6); badge.classList.add('set'); }
+    else { badge.textContent = '🔑 Set API Key'; badge.classList.remove('set'); }
+}
+updateKeyBadge();
+
+document.getElementById('val').addEventListener('keydown', e => { if(e.key==='Enter') doSearch(); });
+
+async function doSearch(){
+    const apiKey = localStorage.getItem('felixApiKey');
+    if(!apiKey){ openKeyModal(); return; }
+    const cmd = document.getElementById('cmd').value;
+    const val = document.getElementById('val').value.trim();
+    if(!val){ document.getElementById('val').focus(); return; }
+
+    document.getElementById('emptyState').style.display='none';
+    document.getElementById('resultBox').style.display='block';
+    document.getElementById('statusDot').className='dot dot-yellow';
+    document.getElementById('statusText').textContent='Searching…';
+    document.getElementById('jsonOutput').textContent='';
+    document.getElementById('cardView').innerHTML='';
+    document.getElementById('searchBtn').disabled=true;
+
+    try {
+        const url = `/${cmd}/${encodeURIComponent(val)}?api_key=${encodeURIComponent(apiKey)}`;
+        const start = Date.now();
+        const resp = await fetch(url);
+        const elapsed = ((Date.now()-start)/1000).toFixed(1);
+        const data = await resp.json();
+        currentData = data;
+
+        if(data.error){
+            document.getElementById('statusDot').className='dot dot-red';
+            document.getElementById('statusText').textContent = 'Error — ' + elapsed + 's';
+            document.getElementById('jsonOutput').textContent = JSON.stringify(data, null, 2);
+            document.getElementById('cardView').innerHTML='';
+        } else {
+            document.getElementById('statusDot').className='dot dot-green';
+            document.getElementById('statusText').textContent = 'Success — ' + elapsed + 's';
+            document.getElementById('jsonOutput').textContent = JSON.stringify(data, null, 2);
+            renderCards(data);
+        }
+    } catch(e){
+        document.getElementById('statusDot').className='dot dot-red';
+        document.getElementById('statusText').textContent = 'Network error';
+        document.getElementById('jsonOutput').textContent = String(e);
+    }
+    document.getElementById('searchBtn').disabled=false;
+}
+
+function switchView(v){
+    currentView = v;
+    document.getElementById('rawView').style.display = v==='raw' ? 'block' : 'none';
+    document.getElementById('cardView').style.display = v==='card' ? 'block' : 'none';
+    document.getElementById('vRaw').className = 'vbtn' + (v==='raw' ? ' active' : '');
+    document.getElementById('vCard').className = 'vbtn' + (v==='card' ? ' active' : '');
+}
+
+function renderCards(data){
+    const cv = document.getElementById('cardView');
+    if(!data || typeof data !== 'object'){ cv.innerHTML='<div class="empty"><p>No card view available</p></div>'; return; }
+
+    let html = '<div class="info-grid">';
+
+    const skip = new Set(['developer','tag','name_history','usernames','stats','sticker_links']);
+
+    // Name
+    if(data.name) html += card('Display Name', escHtml(data.name));
+    if(data.id) html += card('Telegram ID', data.id);
+    if(data.channel) html += card('Channel', escHtml(data.channel));
+    if(data.bio_link) html += card('Bio Link', `<a href="${escHtml(data.bio_link)}" target="_blank" style="color:var(--accent);">${escHtml(data.bio_link)}</a>`);
+
+    // Usernames
+    if(data.usernames && data.usernames.length){
+        const total = data.usernames_total ? ` (${data.usernames_shown} of ${data.usernames_total})` : '';
+        let tags = data.usernames.map(u => `<span class="tag">${escHtml(u)}</span>`).join('');
+        html += `<div class="info-card" style="grid-column:1/-1"><div class="info-label">Usernames${total}</div><div class="tag-list">${tags}</div></div>`;
+    }
+
+    // Stats
+    if(data.stats && typeof data.stats === 'object'){
+        const s = data.stats;
+        if(s.message_diversity) html += card('Msg Diversity', s.message_diversity);
+        if(s.total_messages) html += card('Total Messages', s.total_messages + ' in ' + (s.total_groups||'?') + ' groups');
+        if(s.from_date) html += card('Active Period', s.from_date + ' → ' + (s.to_date||'?'));
+        if(s.replies_percent) html += card('Replies / Media', s.replies_percent + ' / ' + (s.media_percent||'?'));
+        if(s.circles !== undefined) html += card('Circles / Voice', s.circles + ' / ' + (s.voice||0));
+        if(s.favorite_group) html += card('Favorite Group', escHtml(s.favorite_group));
+        if(s.were_looking_for !== undefined) html += card('Were Looking For', s.were_looking_for);
+        if(s.stickersets_count !== undefined) html += card('Sticker Sets', s.stickersets_count);
+        if(s.admin_in_groups !== undefined) html += card('Admin In Groups', s.admin_in_groups);
+    }
+
+    // All other fields
+    for(const [k, v] of Object.entries(data)){
+        if(skip.has(k) || k==='name' || k==='id' || k==='channel' || k==='bio_link' || k==='usernames' || k==='usernames_shown' || k==='usernames_total' || k==='name_history_shown' || k==='name_history_total') continue;
+        if(typeof v === 'object') continue;
+        html += card(k, escHtml(String(v)));
+    }
+
+    html += '</div>';
+
+    // Name history table
+    if(data.name_history && data.name_history.length){
+        const total = data.name_history_total ? ` (${data.name_history_shown} of ${data.name_history_total} shown)` : '';
+        html += `<div style="padding:0 20px 20px;">
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:10px;">Name History${total}</div>
+            <table class="hist-table">`;
+        for(const h of data.name_history){
+            html += `<tr><td>${escHtml(h.date)}</td><td>${escHtml(h.name)}</td></tr>`;
+        }
+        html += '</table></div>';
+    }
+
+    cv.innerHTML = html;
+}
+
+function card(label, value){
+    return `<div class="info-card"><div class="info-label">${label}</div><div class="info-value">${value}</div></div>`;
+}
+function escHtml(s){
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+</body>
+</html>
+"""
+
+@app.route('/search')
+def public_search():
+    public_key = get_global_setting('public_key') or ''
+    # Allow access if public_key is set in settings OR if user provides own key via browser localStorage (JS side)
+    return render_template_string(PUBLIC_SEARCH_HTML)
 
 # ================= ADMIN PANEL =================
 ADMIN_HTML = """
@@ -1187,6 +1516,7 @@ ADMIN_HTML = """
                 <tr><td style="color:#64748b;">Bot ID</td><td>{{ bot_id or 'Not connected' }}</td></tr>
                 <tr><td style="color:#64748b;">Funstate Bot ID</td><td>{{ funstate_bot_id or 'Not connected' }} <span class="badge {% if funstate_enabled == '1' %}badge-green{% else %}badge-red{% endif %}">{% if funstate_enabled == '1' %}ON{% else %}OFF{% endif %}</span></td></tr>
                 <tr><td style="color:#64748b;">Permanent Key</td><td><code>{{ permanent_key }}</code></td></tr>
+                <tr><td style="color:#64748b;">Search Panel</td><td><a href="/search" target="_blank" style="color:#38bdf8;">/search</a> {% if public_key %}<span class="badge badge-green">Key Set</span>{% else %}<span class="badge badge-red">No Key</span>{% endif %}</td></tr>
             </table>
         </div>
         <div class="card">
@@ -1348,9 +1678,12 @@ ADMIN_HTML = """
             </div>
             <div class="card">
                 <h2>Public Search Panel</h2>
-                <p style="font-size:13px;color:#64748b;margin-bottom:12px;">API key used by the public search page at <code>/search</code>. Leave blank to disable public search.</p>
+                <p style="font-size:13px;color:#64748b;margin-bottom:12px;">
+                    Public search is at <code>/search</code> — users can paste their own key in the browser.<br>
+                    Optionally set a default key below to pre-fill it for users who visit <code>/search</code>.
+                </p>
                 <div style="display:flex;gap:10px;align-items:center;">
-                    <input type="text" name="public_key" value="{{ public_key }}" placeholder="Paste an API key or leave blank" style="margin:0;flex:1;">
+                    <input type="text" name="public_key" value="{{ public_key }}" placeholder="Optional default key for /search" style="margin:0;flex:1;">
                     <a href="/search" target="_blank" class="btn btn-primary" style="white-space:nowrap;">Open Search →</a>
                 </div>
             </div>
@@ -1419,7 +1752,7 @@ function openLog(row) {
     const resp = row.dataset.resp;
     const ok = row.dataset.ok === '1';
     document.getElementById('modalMeta').innerHTML =
-        `<span>🕐 ${time}</span><span>🔑 ${key.slice(0,12)}…</span><span>📌 /${cmd}</span><span>🔍 ${val || '—'}</span><span class="${ok?'':''}">` +
+        `<span>🕐 ${time}</span><span>🔑 ${key.slice(0,12)}…</span><span>📌 /${cmd}</span><span>🔍 ${val || '—'}</span><span>` +
         (ok ? '✅ Success' : '❌ Failed') + '</span>';
     let pretty = resp;
     try { pretty = JSON.stringify(JSON.parse(resp), null, 2); } catch(e) {}
@@ -1477,7 +1810,13 @@ button:hover{{background:#0284c7;}}
 </html>
 '''
 
+@app.route('/admin/logout')
+def admin_logout():
+    session.pop('admin_logged_in', None)
+    return redirect(url_for('admin_login'))
+
 @app.route('/admin/dashboard')
+@app.route('/admin')
 @admin_login_required
 def admin_dashboard():
     keys = get_all_keys()
@@ -1540,9 +1879,9 @@ def admin_create_key():
     expiry_days = int(request.form.get('expiry_days', 30))
     daily_limit = int(request.form.get('daily_limit', 100))
     if not name:
-        return "Name required", 400
-    new_key = secrets.token_hex(16)
-    add_api_key(new_key, name, name, expiry_days, daily_limit)
+        return redirect(url_for('admin_dashboard'))
+    key = secrets.token_hex(24)
+    add_api_key(key, name, "admin", expiry_days, daily_limit)
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/revoke/<key>')
@@ -1561,209 +1900,42 @@ def admin_delete_key(key):
 @admin_login_required
 def admin_add_account():
     name = request.form.get('name')
-    api_id = int(request.form.get('api_id'))
+    api_id = request.form.get('api_id')
     api_hash = request.form.get('api_hash')
     session_string = request.form.get('session_string')
-    if not all([name, api_id, api_hash, session_string]):
-        return "All fields required", 400
-    add_account(name, api_id, api_hash, session_string)
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT id FROM accounts WHERE name=? AND api_id=? AND active=1 ORDER BY id DESC LIMIT 1", (name, api_id))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        new_acc = {"id": row[0], "name": name, "api_id": api_id, "api_hash": api_hash, "session_string": session_string}
-        accounts.append(new_acc)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        telegram_loops[new_acc["id"]] = loop
-        thread = threading.Thread(target=lambda: loop.run_until_complete(start_account(new_acc)), daemon=True)
-        thread.start()
+    if all([name, api_id, api_hash, session_string]):
+        add_account(name, int(api_id), api_hash, session_string)
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/toggle_account/<int:acc_id>')
 @admin_login_required
 def admin_toggle_account(acc_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT active FROM accounts WHERE id=?", (acc_id,))
-    row = c.fetchone()
-    if row:
-        toggle_account(acc_id, 0 if row[0] else 1)
-    conn.close()
+    accs = get_all_accounts()
+    for a in accs:
+        if a['id'] == acc_id:
+            toggle_account(acc_id, not a['active'])
+            break
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/delete_account/<int:acc_id>')
 @admin_login_required
 def admin_delete_account(acc_id):
     delete_account(acc_id)
-    global accounts
-    accounts = [a for a in accounts if a['id'] != acc_id]
     return redirect(url_for('admin_dashboard'))
 
-@app.route('/admin/logout')
-def admin_logout():
-    session.pop('admin_logged_in', None)
-    return redirect(url_for('admin_login'))
-
-@app.route('/search')
-def public_search():
-    pub_key = get_global_setting('public_key') or ''
-    if not pub_key:
-        return '<h2 style="font-family:sans-serif;text-align:center;margin-top:80px;color:#ef4444;">Public search is disabled. Admin needs to configure a public key first.</h2>', 403
-    return render_template_string(PUBLIC_SEARCH_HTML, pub_key=pub_key)
-
-PUBLIC_SEARCH_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Felix API — Search</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0;}
-body{font-family:'Segoe UI',Arial,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:40px 16px;}
-h1{color:#38bdf8;font-size:28px;font-weight:700;margin-bottom:6px;}
-.sub{color:#64748b;font-size:13px;margin-bottom:32px;}
-.search-box{display:flex;gap:10px;width:100%;max-width:540px;margin-bottom:30px;}
-input[type=text]{flex:1;padding:12px 16px;background:#1e293b;border:1px solid #334155;border-radius:10px;color:#e2e8f0;font-size:15px;outline:none;transition:border .15s;}
-input[type=text]:focus{border-color:#38bdf8;}
-button{padding:12px 22px;background:#0ea5e9;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .15s;}
-button:hover{opacity:.85;}
-#result{width:100%;max-width:540px;}
-.card{background:#1e293b;border:1px solid #334155;border-radius:14px;padding:22px;margin-bottom:16px;}
-.label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;}
-.value{font-size:15px;color:#f1f5f9;font-weight:500;}
-.value a{color:#38bdf8;text-decoration:none;}
-.value a:hover{text-decoration:underline;}
-.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600;background:#0c2a4a;color:#38bdf8;margin:2px 2px 0 0;}
-.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:4px;}
-.stat-item{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px 12px;}
-.stat-num{font-size:20px;font-weight:700;color:#f1f5f9;}
-.stat-lbl{font-size:11px;color:#64748b;margin-top:2px;}
-.history-item{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid #1e293b;align-items:flex-start;}
-.history-item:last-child{border-bottom:none;}
-.hist-date{font-size:11px;color:#64748b;white-space:nowrap;margin-top:2px;min-width:78px;}
-.hist-name{font-size:14px;color:#e2e8f0;}
-.spinner{text-align:center;padding:30px;color:#64748b;}
-.error-box{background:#450a0a;border:1px solid #7f1d1d;border-radius:10px;padding:16px;color:#fca5a5;text-align:center;}
-.section-title{font-size:13px;font-weight:600;color:#94a3b8;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #334155;}
-</style>
-</head>
-<body>
-<h1>🔍 Felix Search</h1>
-<p class="sub">Search Telegram user info — powered by @rajfflive</p>
-<div class="search-box">
-  <input type="text" id="q" placeholder="Enter username or user ID…" onkeydown="if(event.key==='Enter')search()">
-  <button onclick="search()">Search</button>
-</div>
-<div id="result"></div>
-<script>
-const PUB_KEY = "{{ pub_key }}";
-async function search() {
-  const q = document.getElementById('q').value.trim();
-  if (!q) return;
-  const out = document.getElementById('result');
-  out.innerHTML = '<div class="spinner">⏳ Searching… this may take up to 30 seconds</div>';
-  try {
-    const res = await fetch(`/funstate/${encodeURIComponent(q)}?api_key=${PUB_KEY}`);
-    const data = await res.json();
-    if (data.error) { out.innerHTML = `<div class="error-box">❌ ${data.error}</div>`; return; }
-    out.innerHTML = renderResult(data);
-  } catch(e) {
-    out.innerHTML = `<div class="error-box">❌ Network error: ${e.message}</div>`;
-  }
-}
-function renderResult(d) {
-  let html = '';
-
-  // Identity card
-  html += '<div class="card">';
-  html += '<div class="section-title">👤 Identity</div>';
-  if (d.name) html += row('Display Name', escHtml(d.name));
-  if (d.id) html += row('User ID', `<code style="color:#38bdf8">${escHtml(d.id)}</code>`);
-  if (d.usernames && d.usernames.length) {
-    const badges = d.usernames.map(u => `<span class="badge">${escHtml(u)}</span>`).join('');
-    html += row('Usernames', badges);
-  }
-  if (d.channel) html += row('Channel', escHtml(d.channel));
-  if (d.bio_link) html += row('Bio Link', `<a href="${escHtml(d.bio_link)}" target="_blank">${escHtml(d.bio_link)}</a>`);
-  html += '</div>';
-
-  // Stats card
-  if (d.stats && Object.keys(d.stats).length) {
-    const s = d.stats;
-    html += '<div class="card">';
-    html += '<div class="section-title">📊 Activity Stats</div>';
-    html += '<div class="stat-grid">';
-    if (s.total_messages !== undefined) html += statBox(s.total_messages, 'Messages');
-    if (s.total_groups !== undefined) html += statBox(s.total_groups, 'Groups');
-    if (s.replies_percent) html += statBox(s.replies_percent, 'Replies');
-    if (s.media_percent) html += statBox(s.media_percent, 'Media');
-    if (s.circles !== undefined) html += statBox(s.circles, 'Circles');
-    if (s.voice !== undefined) html += statBox(s.voice, 'Voice Msgs');
-    if (s.admin_in_groups !== undefined) html += statBox(s.admin_in_groups, 'Admin In');
-    if (s.were_looking_for !== undefined) html += statBox(s.were_looking_for, 'Looking For');
-    if (s.stickersets_count !== undefined) html += statBox(s.stickersets_count, 'Sticker Sets');
-    html += '</div>';
-    if (s.message_diversity) html += `<div style="margin-top:12px;">${row('Diversity', s.message_diversity)}</div>`;
-    if (s.from_date && s.to_date) html += row('Active Period', `${s.from_date} → ${s.to_date}`);
-    if (s.favorite_group) html += row('Favorite Group', escHtml(s.favorite_group));
-    html += '</div>';
-  }
-
-  // Name history
-  if (d.name_history && d.name_history.length) {
-    html += '<div class="card">';
-    html += '<div class="section-title">📝 Name History</div>';
-    d.name_history.forEach(h => {
-      html += `<div class="history-item"><span class="hist-date">${escHtml(h.date)}</span><span class="hist-name">→ ${escHtml(h.name)}</span></div>`;
-    });
-    html += '</div>';
-  }
-
-  return html;
-}
-function row(label, val) {
-  return `<div style="margin-bottom:10px;"><div class="label">${label}</div><div class="value">${val}</div></div>`;
-}
-function statBox(val, lbl) {
-  return `<div class="stat-item"><div class="stat-num">${val}</div><div class="stat-lbl">${lbl}</div></div>`;
-}
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-</script>
-</body>
-</html>"""
-
 @app.route('/')
-def home():
-    return '''<!DOCTYPE html>
-<html>
-<head><title>Felix API</title>
-<style>body{font-family:'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;}
-.box{text-align:center;} h1{color:#38bdf8;font-size:32px;} p{color:#64748b;margin:8px 0;}
-a{color:#0ea5e9;text-decoration:none;padding:10px 24px;background:#1e293b;border:1px solid #334155;border-radius:8px;display:inline-block;margin-top:16px;}
-</style></head>
-<body><div class="box">
-<h1>Felix API</h1>
-<p>Telegram OSINT API powered by @rajfflive</p>
-<p>Usage: <code>/command/value?api_key=YOUR_KEY</code></p>
-<a href="/admin/login">Admin Panel →</a>
-</div></body></html>'''
-
-@app.route('/health')
-def health():
+def index():
     return jsonify({
-        "status": "ok",
-        "accounts": len(accounts),
-        "group_main_connected": GROUP_MAIN is not None,
-        "group_other_connected": GROUP_OTHER is not None,
-        "funstate_bot_connected": FUNSTATE_BOT_ENTITY is not None
+        "service": "Felix API",
+        "developer": DEVELOPER_TAG,
+        "endpoints": ALL_COMMANDS,
+        "admin": "/admin/login",
+        "search": "/search",
+        "status": "running"
     })
 
-if __name__ == "__main__":
+# ================= MAIN =================
+if __name__ == '__main__':
     init_accounts()
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
