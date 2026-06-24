@@ -1,3 +1,2 @@
-flask>=3.0.0
-telethon>=1.36.0
-cryptg
+flask
+telethon
