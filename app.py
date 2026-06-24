@@ -371,7 +371,7 @@ def init_accounts():
         if i > 1:
             init_accounts()
 
-# ================= JSON EXTRACTION =================
+# ================= JSON EXTRACTION (for main bot) =================
 def extract_json_objects(text, limit=MAX_RESULTS):
     objects = []
     i = 0
@@ -437,21 +437,70 @@ def finalize_response(data):
 def parse_funstate_response(text):
     """Parse the Funstate bot response into a structured JSON object."""
     result = {}
+    raw = text
+
+    # 1. Extract all URLs (including t.me links)
+    url_pattern = r'https?://[^\s]+'
+    all_urls = re.findall(url_pattern, text)
+    links = [url for url in all_urls if url.strip()]
     
-    # 1. Extract ID
-    id_match = re.search(r'ΙＤ:\s*(\d+)', text)
+    # Also extract any t.me links that might be without protocol? They usually have protocol.
+    # Additional extraction for @mentions (though they are not clickable links, we treat as links)
+    mentions = re.findall(r'@[a-zA-Z0-9_]+', text)
+    for m in mentions:
+        if m not in links:
+            links.append(m)
+    # Remove duplicates
+    links = list(set(links))
+    
+    # Separate sticker pack link and channel link
+    sticker_links = []
+    channel_link = None
+    for link in links:
+        if 'addstickers' in link or 't.me/addstickers' in link:
+            sticker_links.append(link)
+        elif 't.me/Funstate_7bot?start=' in link:
+            # This is the bot's start link, ignore for sticker pack
+            pass
+        else:
+            # If it's a t.me/username link and not addstickers, might be channel
+            if link.startswith('https://t.me/') and 'addstickers' not in link:
+                # Could be channel link
+                channel_link = link
+    # Also check if there is a channel name that might have a link later
+    # We'll also look for a line like "Chαηη℮l: name" but we don't have the link, so we keep the extracted
+    
+    # Filter out the Funstate_7bot start link from links (keep for raw but not in sticker links)
+    links = [l for l in links if 'Funstate_7bot?start=' not in l]
+    
+    result['links'] = links
+    if sticker_links:
+        result['sticker_pack_links'] = sticker_links
+    if channel_link:
+        result['channel_link'] = channel_link
+
+    # 2. Extract ID
+    id_match = re.search(r'IＤ:\s*(\d+)', text)
     if id_match:
         result['id'] = id_match.group(1)
-    
-    # 2. Extract usernames
-    usernames_match = re.search(r'ᴜѕеrηαmеѕ:.*?\n\|\s*(.*?)(?:\n|$)', text, re.DOTALL)
+
+    # 3. Extract usernames
+    usernames_match = re.search(r'usеrnamеѕ:\s*.*?\n\s*\|?\s*(.*?)(?:\n|$)', text, re.DOTALL)
     if usernames_match:
-        usernames = [u.strip() for u in usernames_match.group(1).split('|') if u.strip()]
-        result['usernames'] = usernames
-    
-    # 3. Extract name history
+        usernames_raw = usernames_match.group(1)
+        # Split by | or spaces? Usually they are like | @user1 | @user2
+        # But also may be just spaces.
+        usernames = re.findall(r'@[a-zA-Z0-9_]+', usernames_raw)
+        if usernames:
+            result['usernames'] = list(set(usernames))
+        else:
+            # fallback: split by | and clean
+            parts = [p.strip() for p in usernames_raw.split('|') if p.strip()]
+            result['usernames'] = [p for p in parts if p.startswith('@')]
+
+    # 4. Extract name history
     name_history = []
-    name_section = re.search(r'firsτ ηαm℮ / ⅼαsτ ηαmе:.*?(?:\n\n|\Z)', text, re.DOTALL)
+    name_section = re.search(r'firsτ ηamе / łαsτ ηame:.*?(?:\n\n|\Z)', text, re.DOTALL)
     if name_section:
         lines = name_section.group().split('\n')
         for line in lines:
@@ -462,71 +511,52 @@ def parse_funstate_response(text):
                     name = parts[1].strip()
                     name_history.append({"date": date, "name": name})
         result['name_history'] = name_history
-    
-    # 4. Extract stats
+
+    # 5. Extract stats
     stats = {}
-    
-    # Message diversity
-    div_match = re.search(r'Меѕѕαց℮ diversity\s+([\d.]+%)', text)
+    div_match = re.search(r'div℮rsity\s+([\d.]+%)', text, re.IGNORECASE)
     if div_match:
         stats['message_diversity'] = div_match.group(1)
-    
-    # From/To dates
-    from_match = re.search(r'ᖴrоm\s+([\d/]+)\s+τо\s+([\d/]+)', text)
+    from_match = re.search(r'Frοm\s+([\d/]+)\s+to\s+([\d/]+)', text, re.IGNORECASE)
     if from_match:
         stats['from_date'] = from_match.group(1)
         stats['to_date'] = from_match.group(2)
-    
-    # Total messages and groups
-    msg_match = re.search(r'(\d+)\s+meѕѕaցеѕ\s+in\s+(\d+)\s+groᴜρѕ', text)
+    msg_match = re.search(r'(\d+)\s+mesѕαgеѕ\s+iη\s+(\d+)\s+ցrοuρѕ', text)
     if msg_match:
         stats['total_messages'] = int(msg_match.group(1))
         stats['total_groups'] = int(msg_match.group(2))
-    
-    # Replies and media percentages
-    replies_match = re.search(r'([\d.]+%)\s+r℮ρliеѕ\s+([\d.]+%)\s+mediα', text)
+    replies_match = re.search(r'([\d.]+%)\s+r℮pli℮s\s+([\d.]+%)\s+mеdiα', text)
     if replies_match:
         stats['replies_percent'] = replies_match.group(1)
         stats['media_percent'] = replies_match.group(2)
-    
-    # Circles and voice
-    circles_match = re.search(r'Cirсłeѕ:\s*(\d+),\s+vоiс℮:\s*(\d+)', text)
+    circles_match = re.search(r'Cirсłеѕ:\s*(\d+),\s+voice:\s*(\d+)', text)
     if circles_match:
         stats['circles'] = int(circles_match.group(1))
         stats['voice'] = int(circles_match.group(2))
-    
-    # Favorite group
-    fav_match = re.search(r'Favоrit℮ grоuρ:\s*(.+?)(?:\n|$)', text)
+    fav_match = re.search(r'Fαvoriτе grоuρ:\s*(.+?)(?:\n|$)', text)
     if fav_match:
         stats['favorite_group'] = fav_match.group(1).strip()
-    
-    # Admin in groups
-    admin_match = re.search(r'Admiη iη ցrоᴜpѕ:\s*(\d+)', text)
+    admin_match = re.search(r'Admiη iη ցrоuρѕ:\s*(\d+)', text)
     if admin_match:
         stats['admin_in_groups'] = int(admin_match.group(1))
-    
-    # Stickersets
-    sticker_match = re.search(r'Sτiскerѕeτѕ:\s*(\d+)\s*\[Vi℮w\]', text)
+    sticker_match = re.search(r'Sτiсkerѕеτѕ:\s*(\d+)\s*\[Viеw\]', text)
     if sticker_match:
         stats['stickersets'] = int(sticker_match.group(1))
+    # Also check for "Кηоwn ѕtiсқ℮rѕеτs" – this might contain the link
+    known_stickers = re.search(r'Кηоwn ѕtiсқ℮rѕеτs сreated by .*?:\s*(.*?)(?:\n|$)', text, re.DOTALL)
+    if known_stickers:
+        # Extract links from that section
+        sticker_text = known_stickers.group(1)
+        sticker_urls = re.findall(r'https?://[^\s]+', sticker_text)
+        if sticker_urls:
+            if 'sticker_pack_links' not in result:
+                result['sticker_pack_links'] = []
+            result['sticker_pack_links'].extend(sticker_urls)
     
     result['stats'] = stats
     
-    # 5. Extract any clickable links (URLs, @mentions)
-    links = []
-    # Find URLs
-    urls = re.findall(r'https?://[^\s]+', text)
-    links.extend(urls)
-    # Find @mentions (but exclude the ones already in usernames)
-    mentions = re.findall(r'@[a-zA-Z0-9_]+', text)
-    for m in mentions:
-        if m not in result.get('usernames', []):
-            links.append(m)
-    if links:
-        result['links'] = list(set(links))
-    
-    # 6. Keep raw text for reference
-    result['raw'] = text
+    # 6. Keep raw text
+    result['raw'] = raw
     
     return result
 
@@ -558,12 +588,10 @@ async def query_funstate_bot_async(client, value):
     bot_replies.sort(key=lambda m: m.date)
     combined = "".join([m.raw_text for m in bot_replies])
     
-    # Parse the response into structured data
     parsed = parse_funstate_response(combined)
     return parsed
 
 async def query_main_bot_async(client, command_text, group):
-    """Send command to main bot in a group and capture reply."""
     try:
         sent = await client.send_message(group.id, command_text)
     except Exception as e:
@@ -722,9 +750,8 @@ for cmd in ALL_COMMANDS:
                 group_type = "main" if cmd in SPECIAL_COMMANDS else "other"
                 result = query_bot_sync(f"/{cmd} {value}", group_type)
             
-            # For funstate/names, result is already parsed; for others, finalize it
             if cmd in ("funstate", "names"):
-                # Already parsed, just ensure developer tag
+                # Already parsed
                 if isinstance(result, dict):
                     result['developer'] = DEVELOPER_TAG
                     result['tag'] = DEVELOPER_TAG
@@ -753,7 +780,7 @@ def statu_endpoint():
     add_stats("statu", "", 'error' not in result)
     return jsonify(result)
 
-# ================= ADMIN PANEL =================
+# ================= ADMIN PANEL (unchanged) =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
