@@ -87,7 +87,7 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- DB HELPERS ----------
+# ---------- DB HELPERS (unchanged) ----------
 def get_global_setting(key):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -431,39 +431,37 @@ def finalize_response(data):
     else:
         return data
 
-# ================= QUERY FUNCTIONS =================
+# ================= IMPROVED QUERY FUNCTIONS =================
 async def query_main_bot_async(client, command_text, group):
-    """Send command to main bot in a group and capture reply."""
+    """Send command to group and capture all bot messages after it."""
     try:
         sent = await client.send_message(group.id, command_text)
     except Exception as e:
         logger.error(f"Send error: {e}")
         return {"error": str(e)}
-    msg_id = sent.id
-    logger.info(f"📤 Sent {command_text} to group {group.title}")
+    sent_time = sent.date
+    logger.info(f"📤 Sent {command_text} to group {group.title} at {sent_time}")
 
     bot_replies = []
-    for attempt in range(25):
+    # We'll attempt to fetch messages multiple times
+    for attempt in range(20):
         await asyncio.sleep(1.5)
-        async for msg in client.iter_messages(group.id, limit=200):
-            if msg.sender_id == BOT_ID and msg.reply_to_msg_id == msg_id:
+        # Fetch messages from the group that are from bot and after sent_time
+        async for msg in client.iter_messages(group.id, offset_date=sent_time, limit=50):
+            if msg.sender_id == BOT_ID and msg.date > sent_time:
+                # Check if it contains the target value (the second word of command)
+                # But we don't always know the target; we can just collect all bot messages after command
                 bot_replies.append(msg)
-                logger.info(f"📩 Found reply (attempt {attempt+1})")
         if bot_replies:
+            # If we have replies, break the loop
             break
 
     if not bot_replies:
         return {"error": "Bot did not respond"}
 
-    seen = set()
-    unique_replies = []
-    for msg in bot_replies:
-        if msg.id not in seen:
-            seen.add(msg.id)
-            unique_replies.append(msg)
-    unique_replies.sort(key=lambda m: m.date)
-
-    combined = "".join([m.raw_text for m in unique_replies])
+    # Sort by date (oldest first)
+    bot_replies.sort(key=lambda m: m.date)
+    combined = "".join([m.raw_text for m in bot_replies])
     objects = extract_json_objects(combined)
     if objects:
         return objects
@@ -479,33 +477,23 @@ async def query_funstate_bot_async(client, value):
     except Exception as e:
         logger.error(f"Send to Funstate error: {e}")
         return {"error": str(e)}
-    msg_id = sent.id
-    logger.info(f"📤 Sent plain '{value}' to Funstate bot")
+    sent_time = sent.date
+    logger.info(f"📤 Sent plain '{value}' to Funstate bot at {sent_time}")
 
     bot_replies = []
-    for attempt in range(25):
+    for attempt in range(20):
         await asyncio.sleep(1.5)
-        # Fetch messages from the bot's chat (the bot itself)
-        async for msg in client.iter_messages(FUNSTATE_BOT_ENTITY, limit=200):
-            if msg.sender_id == FUNSTATE_BOT_ID and msg.reply_to_msg_id == msg_id:
+        async for msg in client.iter_messages(FUNSTATE_BOT_ENTITY, offset_date=sent_time, limit=50):
+            if msg.sender_id == FUNSTATE_BOT_ID and msg.date > sent_time:
                 bot_replies.append(msg)
-                logger.info(f"📩 Found reply (attempt {attempt+1})")
         if bot_replies:
             break
 
     if not bot_replies:
         return {"error": "Funstate bot did not respond"}
 
-    seen = set()
-    unique_replies = []
-    for msg in bot_replies:
-        if msg.id not in seen:
-            seen.add(msg.id)
-            unique_replies.append(msg)
-    unique_replies.sort(key=lambda m: m.date)
-
-    combined = "".join([m.raw_text for m in unique_replies])
-    # Return the raw text (could be multi-line)
+    bot_replies.sort(key=lambda m: m.date)
+    combined = "".join([m.raw_text for m in bot_replies])
     return {"info": combined}
 
 # ================= MAIN QUERY FUNCTION =================
@@ -545,7 +533,7 @@ def query_bot_sync(command_text, group_type, bot_type="main"):
 
     future = asyncio.run_coroutine_threadsafe(do_query(), loop)
     try:
-        result = future.result(timeout=50)
+        result = future.result(timeout=60)  # increased timeout
         success = 'error' not in result
         add_stats(command_text.split()[0] if command_text else 'unknown', command_text.split()[1] if len(command_text.split()) > 1 else '', success)
         return result
@@ -625,7 +613,7 @@ def statu_endpoint():
     add_stats("statu", "", 'error' not in result)
     return jsonify(result)
 
-# ================= ADMIN PANEL =================
+# ================= ADMIN PANEL (unchanged) =================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
