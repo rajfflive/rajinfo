@@ -23,7 +23,7 @@ DEVELOPER_TAG = "@rajfflive"
 CACHE_EXPIRE_SECONDS = int(os.environ.get("CACHE_EXPIRE_SECONDS", 86400))
 MAX_RESULTS = 4
 
-GROUP_MAIN_NAME = "USERSXINFO CHEATING GC"
+GROUP_MAIN_NAME = "USERXINFO CHATTING GC"
 GROUP_OTHER_NAME = "TGTOINFO"
 BOT_USERNAME = "usersXinfo0bot"
 FUNSTATE_BOT_USERNAME = "Funstate_7bot"
@@ -87,6 +87,8 @@ def init_db():
     c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('group_main_enabled', '1')")
     c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('delete_delay', '10')")
     c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('public_key', '')")
+    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('group_main_id', '-1003850536279')")
+    c.execute("INSERT OR IGNORE INTO global_settings (key, value) VALUES ('group_other_id', '')")
     conn.commit()
     conn.close()
 init_db()
@@ -322,23 +324,38 @@ async def start_account(account_data):
     logger.info(f"✅ Account {account_data['name']} (ID: {acc_id}) connected")
     account_clients[acc_id] = client
 
-    for name, var_name in [(GROUP_MAIN_NAME, 'GROUP_MAIN'), (GROUP_OTHER_NAME, 'GROUP_OTHER')]:
-        try:
-            entity = await client.get_entity(name)
+    group_main_id_str = get_global_setting('group_main_id') or ''
+    group_other_id_str = get_global_setting('group_other_id') or ''
+
+    for id_str, name, var_name in [
+        (group_main_id_str, GROUP_MAIN_NAME, 'GROUP_MAIN'),
+        (group_other_id_str, GROUP_OTHER_NAME, 'GROUP_OTHER')
+    ]:
+        entity = None
+        if id_str.strip():
+            try:
+                gid = int(id_str.strip())
+                entity = await client.get_entity(gid)
+                logger.info(f"✅ {var_name} by ID {gid}: {getattr(entity, 'title', gid)}")
+            except Exception as e:
+                logger.warning(f"⚠️ {var_name} ID lookup failed ({e}), trying by name...")
+        if entity is None:
+            try:
+                entity = await client.get_entity(name)
+                logger.info(f"✅ {var_name} by name: {entity.title} (ID: {entity.id})")
+            except:
+                async for dialog in client.iter_dialogs():
+                    if dialog.name == name:
+                        entity = dialog.entity
+                        logger.info(f"✅ {var_name} via dialog: {dialog.name}")
+                        break
+        if entity is not None:
             if var_name == 'GROUP_MAIN':
                 GROUP_MAIN = entity
             else:
                 GROUP_OTHER = entity
-            logger.info(f"✅ {var_name}: {entity.title} (ID: {entity.id})")
-        except:
-            async for dialog in client.iter_dialogs():
-                if dialog.name == name:
-                    if var_name == 'GROUP_MAIN':
-                        GROUP_MAIN = dialog.entity
-                    else:
-                        GROUP_OTHER = dialog.entity
-                    logger.info(f"✅ {var_name} via dialog: {dialog.name}")
-                    break
+        else:
+            logger.error(f"❌ Could not resolve {var_name} (ID='{id_str}', name='{name}')")
 
     try:
         bot_entity = await client.get_entity(BOT_USERNAME)
@@ -932,7 +949,15 @@ async def query_main_bot_async(client, command_text, group):
         if bot_replies:
             break
 
+    # Read delete delay from admin panel setting
+    try:
+        _delay = int(get_global_setting('delete_delay') or '10')
+    except Exception:
+        _delay = 10
+    logger.info(f"⏳ Waiting {_delay}s before deleting messages...")
+
     if not bot_replies:
+        await asyncio.sleep(_delay)
         await client.delete_messages(group.id, [msg_id])
         return {"error": "Bot did not respond"}
 
@@ -956,12 +981,14 @@ async def query_main_bot_async(client, command_text, group):
             except:
                 pass
     if not objects:
+        await asyncio.sleep(_delay)
         await client.delete_messages(group.id, [msg_id] + [m.id for m in unique_replies])
         return {"error": "No valid JSON found"}
 
     to_delete = [msg_id] + [m.id for m in unique_replies]
+    await asyncio.sleep(_delay)
     await client.delete_messages(group.id, to_delete)
-    logger.info(f"🗑️ Deleted {len(to_delete)} messages")
+    logger.info(f"🗑️ Deleted {len(to_delete)} messages after {_delay}s delay")
     if len(objects) == 1:
         return finalize_response(objects[0])
     else:
@@ -1941,6 +1968,27 @@ ADMIN_HTML = """
                     <a href="/search" target="_blank" class="btn btn-primary" style="white-space:nowrap;">Open Search →</a>
                 </div>
             </div>
+            <div class="card">
+                <h2>🔗 Group IDs (Special Commands)</h2>
+                <p style="font-size:13px;color:#64748b;margin-bottom:16px;">
+                    Special commands (/upiinfo /fam /family /pan /tg /leak) wala group ka Telegram ID yahan set karo.<br>
+                    ID se connect hoga — group rename ya ban hone ke baad bhi kaam karega.<br>
+                    Format: <code>-100xxxxxxxxxx</code> (negative number with -100 prefix)
+                </p>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+                    <div>
+                        <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px;">Special Commands Group ID (GROUP_MAIN)</label>
+                        <input type="text" name="group_main_id" value="{{ group_main_id }}" placeholder="-100xxxxxxxxxx" style="margin:0;font-family:monospace;">
+                        <div style="font-size:11px;color:#475569;margin-top:4px;">Current connected: <code>{{ group_main_name }}</code></div>
+                    </div>
+                    <div>
+                        <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px;">Other Group ID (GROUP_OTHER / TGTOINFO)</label>
+                        <input type="text" name="group_other_id" value="{{ group_other_id }}" placeholder="-100xxxxxxxxxx (optional)" style="margin:0;font-family:monospace;">
+                        <div style="font-size:11px;color:#475569;margin-top:4px;">Current connected: <code>{{ group_other_name }}</code></div>
+                    </div>
+                </div>
+                <div class="alert alert-info" style="margin-top:12px;margin-bottom:0;">⚠️ Group ID change karne ke baad app ko <b>restart</b> karo — tabhi naya group connect hoga.</div>
+            </div>
             <button type="submit" class="btn btn-primary" style="margin-top:4px;">Save All Settings</button>
         </form>
     </div>
@@ -2094,6 +2142,8 @@ def admin_dashboard():
     group_main_enabled = get_global_setting('group_main_enabled') or '1'
     delete_delay = get_global_setting('delete_delay') or '10'
     public_key = get_global_setting('public_key') or ''
+    group_main_id = get_global_setting('group_main_id') or ''
+    group_other_id = get_global_setting('group_other_id') or ''
     return render_template_string(ADMIN_HTML,
                                  keys=keys,
                                  accounts=accs,
@@ -2111,7 +2161,9 @@ def admin_dashboard():
                                  funstate_enabled=funstate_enabled,
                                  group_main_enabled=group_main_enabled,
                                  delete_delay=delete_delay,
-                                 public_key=public_key)
+                                 public_key=public_key,
+                                 group_main_id=group_main_id,
+                                 group_other_id=group_other_id)
 
 @app.route('/admin/toggle_command', methods=['POST'])
 @admin_login_required
@@ -2127,6 +2179,10 @@ def admin_toggle_command():
     set_global_setting('delete_delay', delete_delay)
     public_key_val = request.form.get('public_key', '').strip()
     set_global_setting('public_key', public_key_val)
+    group_main_id_val = request.form.get('group_main_id', '').strip()
+    set_global_setting('group_main_id', group_main_id_val)
+    group_other_id_val = request.form.get('group_other_id', '').strip()
+    set_global_setting('group_other_id', group_other_id_val)
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/clear_cache')
