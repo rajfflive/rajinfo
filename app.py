@@ -273,7 +273,8 @@ def clear_cache():
 
 # ================= FLASK =================
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(16)
+app.secret_key = os.environ.get("SECRET_KEY", "felix-stable-secret-2024")
+app.config['SESSION_COOKIE_NAME'] = 'rajff_session'
 
 @app.errorhandler(Exception)
 def handle_exception(e):
